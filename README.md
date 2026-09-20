@@ -1,73 +1,82 @@
 # pi-photo-frame
 
-Raspberry Pi Zero 2 W と [Immich](https://immich.app/) で作るデジタルフォトフレーム。
+**English** | [日本語](README-ja.md)
 
-Immich から写真を取得してスライドショー表示し、タッチで操作できる。
-人感センサーと連動して、人がいないときは画面を消し、近づくか触れば復帰する。
-デスクトップ環境を持たず、SDL2 の KMSDRM ドライバで直接描画する。
+A digital photo frame built with a Raspberry Pi Zero 2 W and [Immich](https://immich.app/).
 
-**RAM 512MB の Zero 2 W で常時稼働させることが設計上の最大の制約**であり、
-画像バッファの枚数と画像パイプラインの設計はすべてこの制約から逆算されている。
+It pulls photos from Immich and shows them as a slideshow you can control by touch.
+A motion sensor turns the display off when nobody is around, and it wakes up when
+someone approaches or touches the screen. There is no desktop environment — the app
+draws directly through SDL2's KMSDRM driver.
 
-## 主な機能
+**Running continuously on a Zero 2 W with 512 MB of RAM is the single hardest
+constraint in this design.** The number of image buffers and the shape of the image
+pipeline were both worked backwards from that limit.
 
-- Immich のアルバム / お気に入り / デイリーピックアップから写真を取得
-- 4種類の遷移効果（クロスフェード / 黒フェード / スライド / ワイプ）とランダム選択
-- 写真の収め方を3方式から選択（内接 / 外接 / 縦横の向きが一致するときだけ外接）
-- 時計・撮影日・写真カウンタ・次の送りまでのカウントダウンゲージのオーバーレイ
-- タッチ操作による写真送り、メニュー・設定・アルバム選択の3画面
-- AM312 人感センサーとタッチによる消灯・復帰（DRM DPMS）
-- 日本語 / 英語の UI 切り替えと、日付・時刻の書式選択
-- 表示解像度で確定済みの画像をディスクキャッシュし、実行時のリサイズを行わない
+## Features
 
-## 必要なもの
+- Pulls photos from an Immich album, your favorites, or a daily pickup rotation
+- Four transition effects (crossfade, fade to black, slide, wipe) plus random selection
+- Three ways to fit a photo to the screen (contain, cover, or cover only when the
+  orientation matches)
+- Overlays for the clock, capture date, photo counter, and a countdown gauge to the
+  next slide
+- Touch to advance photos, with three screens: menu, settings, and album picker
+- Display sleep and wake driven by an AM312 motion sensor and by touch (DRM DPMS)
+- Switchable UI language (Japanese / English) and selectable date and time formats
+- Images are cached to disk already sized for the display, so nothing is resized at runtime
+
+## What you need
 
 | | |
 |---|---|
-| ボード | Raspberry Pi Zero 2 W（RAM 512MB / VideoCore IV / Wi-Fi 2.4GHz のみ） |
-| OS | Raspberry Pi OS Lite **ARM64 (64bit)** |
-| ディスプレイ | mini HDMI 接続ディスプレイ + USB タッチパネル（1024x600） |
-| センサー | AM312 PIR 人感センサー（GPIO 18、任意） |
-| その他 | microSD 16GB 以上、電源アダプタ |
-| サーバー | セルフホストの Immich |
+| Board | Raspberry Pi Zero 2 W (512 MB RAM / VideoCore IV / 2.4 GHz Wi-Fi only) |
+| OS | Raspberry Pi OS Lite, **ARM64 (64-bit)** |
+| Display | A mini HDMI display plus a USB touch panel (1024x600) |
+| Sensor | AM312 PIR motion sensor (GPIO 18, optional) |
+| Other | microSD card, 16 GB or larger, and a power supply |
+| Server | A self-hosted Immich instance |
 
-**Zero 2 W に DSI コネクタは存在しない。** Raspberry Pi 公式のタッチディスプレイ（DSI 接続）は
-使えないため、mini HDMI + USB タッチパネルを前提としている。
+**The Zero 2 W has no DSI connector.** The official Raspberry Pi touch display
+(which connects over DSI) cannot be used, so this project assumes mini HDMI plus a
+USB touch panel.
 
-## 必須設定（これが無いと画面に何も出ない）
+## Required settings (without these, nothing appears on screen)
 
 ### 1. `SDL_RENDER_DRIVER=opengles2`
 
-VideoCore IV が対応するのは OpenGL ES 2.0 のみ。SDL2 は既定で `opengl` を選ぶが、
-このレンダラは**生成に成功したうえで描画命令だけを黙って無視する**。
-`Renderer.clear()` による塗りつぶしだけが反映され、テクスチャが一切描かれない紛らわしい状態になる。
+The VideoCore IV only supports OpenGL ES 2.0. SDL2 picks `opengl` by default, and
+**that renderer is created successfully and then silently ignores every draw call.**
+You end up in a confusing state where `Renderer.clear()` fills the screen but no
+texture is ever drawn.
 
-`docker-compose.yml` で指定済み。デバッグ中に環境変数を整理して消さないこと。
+This is already set in `docker-compose.yml`. Do not drop it while tidying up
+environment variables during debugging.
 
-### 2. `cmdline.txt` のモード指定
+### 2. A mode line in `cmdline.txt`
 
-`/boot/firmware/cmdline.txt` に次の指定が必要。
+`/boot/firmware/cmdline.txt` needs this entry:
 
 ```
 video=HDMI-A-1:1024x600MR@50e
 ```
 
-mini HDMI 変換アダプタが 40MHz 以上のピクセルクロックを通せないため、
-標準の 1024x600@60（51.5MHz）では何も表示されない。
-この指定により 1024x600 @ 49.61Hz / 36.36MHz で動作する。
+On the hardware this was developed against, the mini HDMI adapter could not carry a
+pixel clock at or above 40 MHz, so the standard 1024x600@60 (51.5 MHz) produced no
+picture at all. With the line above it runs at 1024x600 @ 49.61 Hz / 36.36 MHz.
 
-使用するアダプタとパネルによって必要な値は変わる。詳細な切り分けは
-[SPECIFICATION.md](SPECIFICATION.md) の 9-9 を参照。
+The value you need depends on your adapter and panel. Section 9-9 of
+[SPECIFICATION.md](SPECIFICATION.md) walks through how this was isolated.
 
-## セットアップ
+## Setup
 
-### ホスト側の準備
+### Preparing the host
 
-1. `/boot/firmware/config.txt` で Full KMS（`dtoverlay=vc4-kms-v3d`）を有効にする
-2. 上記の `video=` 指定を `cmdline.txt` に追加する
-3. zram swap を有効にする（RAM 512MB の保険）
-4. フレームバッファコンソールを切り離す（消灯・復帰のたびにコンソールの文字が
-   一瞬見えるのを防ぐ）
+1. Enable Full KMS (`dtoverlay=vc4-kms-v3d`) in `/boot/firmware/config.txt`
+2. Add the `video=` line above to `cmdline.txt`
+3. Enable zram swap (insurance against the 512 MB limit)
+4. Detach the framebuffer console, so console text does not flash on screen every
+   time the display sleeps or wakes
 
 ```bash
 sudo install -m 755 tools/host-setup/pf-fbcon-off.sh /usr/local/sbin/pf-fbcon-off.sh
@@ -75,139 +84,152 @@ sudo install -m 644 tools/host-setup/pf-fbcon-off.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now pf-fbcon-off.service
 ```
 
-### 資格情報と設定
+### Credentials and configuration
 
 ```bash
-cp .env.sample .env                              # Immich の URL と API キーを入れる
+cp .env.sample .env                              # put your Immich URL and API key here
 cp config/settings.sample.json config/settings.json
 ```
 
-`.env` の `GID_*` はデバイスのグループ ID で、**ホストごとに異なる**。
-必ず実機で確認してから設定する。
+`GID_*` in `.env` holds device group IDs, and **these differ from host to host.**
+Check them on your own machine before filling them in:
 
 ```bash
 getent group video render input gpio
 ```
 
-### 起動
+### Running it
 
 ```bash
-docker compose build     # ARM64 実機上でネイティブビルドする（QEMU は不要）
+docker compose build     # builds natively on the ARM64 device; no QEMU needed
 docker compose up -d
 docker compose logs -f
 ```
 
-自動起動は `restart: unless-stopped` による。systemd ユニットは作らない。
+Startup on boot is handled by `restart: unless-stopped`. There is no systemd unit.
 
-**Zero 2 W ではビルドに 10 分以上かかる。** その間 CPU が飽和するため、
-SSH 越しに実行する場合は `setsid nohup` で切り離し、ログをポーリングして回収する。
+**A build takes more than ten minutes on a Zero 2 W** and saturates the CPU while it
+runs. If you are working over SSH, detach it with `setsid nohup` and poll the log
+file for the result.
 
-## 操作
+## Controls
 
-| 操作 | 動作 |
+| Gesture | Action |
 |---|---|
-| 画面の左 20% をタップ | 前の写真 |
-| 画面の右 20% をタップ | 次の写真 |
-| 画面の中央をタップ | 時計・説明文・歯車ボタンを一時表示 |
-| 歯車ボタン（左上）をタップ | メニューを開く |
+| Tap the left 20% of the screen | Previous photo |
+| Tap the right 20% of the screen | Next photo |
+| Tap the center | Briefly show the clock, caption, and gear button |
+| Tap the gear button (top left) | Open the menu |
 
-メニューからは基本設定とアルバム選択に進める。設定はその場で反映される。
+The menu leads to the settings screen and the album picker. Changes take effect
+immediately.
 
-## 設定項目
+## Configuration
 
-`config/settings.json` で管理する。ほとんどの項目は基本設定画面から変更できる。
+Settings live in `config/settings.json`. Most of them can also be changed from the
+settings screen.
 
-| キー | 既定値 | 内容 |
+| Key | Default | Description |
 |---|---|---|
-| `language` | `ja` | UI の言語（`ja` / `en`） |
-| `time_format` | `24h` | 時計の書式（`24h` / `12h`） |
-| `date_format` | `ymd_slash` | 撮影日の書式（`ymd_slash` / `mdy_slash` / `dmy_slash` / `long`） |
-| `interval` | `10` | 写真の表示間隔（秒） |
-| `transition` | `crossfade` | 遷移効果（`crossfade` / `fade_black` / `slide` / `wipe` / `random`） |
-| `transition_duration` | `1.0` | 遷移にかける時間（秒） |
-| `display_mode` | `sequential` | 表示順（`sequential` / `random`） |
-| `photo_fit` | `contain` | 写真の収め方（`contain` / `cover` / `smart`） |
-| `source` | `favorites` | 写真ソース（`favorites` / `album` / `daily_pickup`） |
-| `album_id` | `''` | `source` が `album` のときのアルバム ID |
-| `show_clock` | `true` | 時計の表示 |
-| `show_comment` | `true` | 撮影日と説明文の表示 |
-| `show_countdown` | `true` | 次の送りまでのカウントダウンゲージ |
-| `comment_font_size` | `24` | 説明文の文字サイズ（px） |
-| `power_saving_enabled` | `true` | 省電力（無操作で消灯する） |
-| `power_saving_timeout` | `300` | 消灯までの無操作時間（秒） |
-| `display_wakeup_delay` | `3.0` | 復帰後に操作を受け付けるまでの待ち時間（秒） |
-| `motion_sensor_enabled` | `true` | 人感センサーの有効・無効 |
-| `photo_cache_max_mb` | `512` | 画像キャッシュの上限（`0` で無制限） |
-| `cache_lifetime_hours` | `24` | 写真リストのキャッシュ有効期間（時間） |
-| `daily_pickup_count` | `3` | デイリーピックアップで1日に選ぶアルバム数 |
+| `language` | `ja` | UI language (`ja` / `en`) |
+| `time_format` | `24h` | Clock format (`24h` / `12h`) |
+| `date_format` | `ymd_slash` | Capture date format (`ymd_slash` / `mdy_slash` / `dmy_slash` / `long`) |
+| `interval` | `10` | Seconds each photo is shown |
+| `transition` | `crossfade` | Transition effect (`crossfade` / `fade_black` / `slide` / `wipe` / `random`) |
+| `transition_duration` | `1.0` | Seconds a transition takes |
+| `display_mode` | `sequential` | Playback order (`sequential` / `random`) |
+| `photo_fit` | `contain` | How a photo is fitted (`contain` / `cover` / `smart`) |
+| `source` | `favorites` | Photo source (`favorites` / `album` / `daily_pickup`) |
+| `album_id` | `''` | Album ID, used when `source` is `album` |
+| `show_clock` | `true` | Show the clock |
+| `show_comment` | `true` | Show the capture date and caption |
+| `show_countdown` | `true` | Show the countdown gauge to the next slide |
+| `comment_font_size` | `24` | Caption font size in pixels |
+| `power_saving_enabled` | `true` | Turn the display off after a period of inactivity |
+| `power_saving_timeout` | `300` | Seconds of inactivity before sleeping |
+| `display_wakeup_delay` | `3.0` | Seconds to wait after waking before accepting input |
+| `motion_sensor_enabled` | `true` | Enable or disable the motion sensor |
+| `photo_cache_max_mb` | `512` | Image cache limit in MB (`0` means unlimited) |
+| `cache_lifetime_hours` | `24` | How long a cached photo list stays valid |
+| `daily_pickup_count` | `3` | Albums picked per day in daily pickup mode |
 
-`display_wakeup_delay` の既定値 3.0 秒は、パネルが実際に映るまでの実測（約 2.0〜2.4 秒）に
-余裕を持たせた値。DPMS=On の送出が完了しても、パネルはすぐには映らない。
+The default of 3.0 seconds for `display_wakeup_delay` comes from measuring how long
+the panel actually takes to show an image (roughly 2.0 to 2.4 seconds), with some
+headroom. **Completing the DPMS=On call does not mean the panel is displaying yet.**
 
-### 写真の収め方（`photo_fit`）
+### Fitting photos (`photo_fit`)
 
-| 値 | 動作 |
+| Value | Behavior |
 |---|---|
-| `contain` | 画面に内接させる。画面と縦横比が違う写真には黒帯が出る |
-| `cover` | 画面に外接させる。はみ出す部分は切り取られる |
-| `smart` | 写真と画面の「縦横の向き」が一致するときだけ `cover`、それ以外は `contain` |
+| `contain` | Fit the whole photo on screen. Photos with a different aspect ratio get black bars |
+| `cover` | Fill the screen. Anything outside the frame is cropped |
+| `smart` | Use `cover` only when the photo and the screen share the same orientation, otherwise `contain` |
 
-方式ごとに別のキャッシュファイルを持つため、**切り替えた直後はその方式ぶんの
-初回一巡でフレームレートが落ちる**。一度キャッシュが埋まれば垂直同期に張り付く。
+Each mode keeps its own cache files, so **the first pass after switching modes runs at
+a lower frame rate** while that mode's cache fills. Once it is populated, the frame
+rate sits at vsync again.
 
-## 開発
+## Development
 
-VS Code Dev Containers を使う。x86 上で動き、GUI は VNC 経由で見る。
+Development happens in VS Code Dev Containers. It runs on x86, and you view the GUI
+over VNC:
 
 ```
 http://localhost:6080/vnc.html?show_dot=true
 ```
 
-アプリがマウスカーソルを非表示にする（実機のタッチパネルでカーソルを出さないため）ので、
-`show_dot` を付けないと noVNC 上でカーソルが見えない。
+The app hides the mouse cursor (so no cursor appears on the real touch panel), which
+means you will not see a cursor in noVNC unless you add `show_dot`.
 
-解像度は実機と同じ 1024x600。Python 依存はイメージに焼いてあり、
-pygame-ce / SDL / Python のバージョンは実機と一致する。
+The resolution matches the device at 1024x600. Python dependencies are baked into the
+image, so pygame-ce, SDL, and Python are the same versions as on the device.
 
-**検証は3階層あり、どの階層で確認したかを常に区別する必要がある。**
+**There are three verification tiers, and it matters which one a result came from.**
 
-| 階層 | 環境 | SDL ドライバ | 検証できること |
+| Tier | Environment | SDL driver | What it can verify |
 |---|---|---|---|
-| 1 | Dev Container（x86 / VNC） | `x11` | UI レイアウト、ロジック層、Immich 疎通 |
-| 2 | 実機ホスト直実行（ARM64） | `kmsdrm` | KMSDRM 描画、タッチ、GPIO、消灯、fps |
-| 3 | 実機コンテナ（ARM64 / Docker） | `kmsdrm` | 最終的な運用形態のすべて |
+| 1 | Dev Container (x86 / VNC) | `x11` | UI layout, logic layer, Immich connectivity |
+| 2 | Directly on the device (ARM64) | `kmsdrm` | KMSDRM rendering, touch, GPIO, display sleep, fps |
+| 3 | Container on the device (ARM64 / Docker) | `kmsdrm` | Everything, in its final deployed form |
 
-**性能とメモリの数値は階層3で測ったものを正とする。** アーキテクチャ・SDL ドライバ・
-GPU・RAM がすべて異なるため、階層1で動いたことを根拠に実機の挙動を主張できない。
+**Performance and memory numbers are only trusted from tier 3.** The architecture,
+SDL driver, GPU, and available RAM all differ, so something working in tier 1 says
+nothing about how the device behaves.
 
-## ドキュメント
+## Documentation
 
-- [SPECIFICATION.md](SPECIFICATION.md) — 完全な仕様と、実機での検証結果
-- [.claude/architecture.md](.claude/architecture.md) — 確定した技術的決定事項と禁止パターン、
-  「対で更新が必要な箇所」の一覧
-- [.claude/coding-style.md](.claude/coding-style.md) — コーディング規約
-- [tools/verification/README.md](tools/verification/README.md) — 検証用スクリプト
+- [SPECIFICATION.md](SPECIFICATION.md) — the full specification and measurements taken
+  on real hardware
+- [.claude/architecture.md](.claude/architecture.md) — settled technical decisions,
+  forbidden patterns, and the list of places that must be changed together
+- [.claude/coding-style.md](.claude/coding-style.md) — coding conventions
+- [tools/verification/README.md](tools/verification/README.md) — verification scripts
 
-実機の運用手順（SSH・デプロイ・実測コマンド）と開発記録（作業コンテキスト・既知の問題）は、
-自宅環境の情報を含むため非公開リポジトリで管理している。
-コードのコメントやドキュメントに `.claude/workflows.md` /
-`.claude/context/known-issues.md` への参照が残っているのは出典を示すもので、
-このリポジトリには含まれない。
+**These documents are written in Japanese.** This README is the only English
+document in the repository.
 
-## 技術的な要点
+Operational procedures for the device (SSH, deployment, measurement commands) and the
+development log (working context, known issues) are kept in a private repository,
+because they contain details about a home network. Comments and documents here still
+refer to `.claude/workflows.md` and `.claude/context/known-issues.md` as sources;
+those files are not part of this repository.
 
-- **GUI は pygame-ce。** `pygame._sdl2.video` の `Renderer` / `Texture` を使い、
-  遷移の合成は GPU に委ねる。フルスクリーンのアルファ合成を CPU 側（`Surface.blit`）で
-  行うと Zero 2 W では成立しない
-- **常駐テクスチャは3枚まで**（現在の写真 / 次の写真 / UI オーバーレイ）。
-  先読みは次の1枚を超えない
-- **画像は表示解像度で確定済みの状態でディスクキャッシュする。** 描画パスでリサイズしない
-- **消灯は ctypes 経由の DRM DPMS。** `vcgencmd display_power` は Full KMS では無効、
-  `/sys/class/graphics/fb0/blank` は SDL が DRM master を握ると無効になる。
-  DRM master は1プロセスしか持てないため、消灯時は SDL を破棄して master を解放する
-- **消灯中は SDL が無く pygame のイベントを取得できない。** タッチによる復帰は
-  `/dev/input` の直読みで行う
+## Design notes
 
-## ライセンス
+- **The GUI is pygame-ce.** It uses `Renderer` and `Texture` from
+  `pygame._sdl2.video` so the GPU composites transitions. Doing full-screen alpha
+  compositing on the CPU (`Surface.blit`) does not hold up on a Zero 2 W
+- **At most three textures stay resident** (current photo, next photo, UI overlay),
+  and prefetching never goes beyond the next single photo
+- **Images are cached to disk already sized for the display.** Nothing is resized in
+  the drawing path
+- **Display sleep goes through DRM DPMS via ctypes.** `vcgencmd display_power` does
+  nothing under Full KMS, and `/sys/class/graphics/fb0/blank` stops working once SDL
+  holds DRM master. Only one process can hold DRM master, so the app tears down SDL
+  to release it before sleeping
+- **While the display is off there is no SDL, so pygame events are unavailable.**
+  Waking on touch is done by reading `/dev/input` directly
 
-MIT License. [LICENSE](LICENSE) を参照。
+## License
+
+MIT License. See [LICENSE](LICENSE).
