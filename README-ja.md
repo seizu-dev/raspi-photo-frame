@@ -1,4 +1,4 @@
-# pi-photo-frame
+# raspi-photo-frame
 
 [English](README.md) | **日本語**
 
