@@ -1,0 +1,20 @@
+# Claude Code
+.claude/plans/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 秘匿情報
+/config.py
+/settings.json
+/.env
+/config/settings.json
+
+# キャッシュ
+cache/
+
+# 先行プロジェクト photo-frame の参照用 clone（移植元。追跡しない）
+/.reference/

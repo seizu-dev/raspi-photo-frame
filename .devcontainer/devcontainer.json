@@ -1,0 +1,19 @@
+{
+	"name": "pi-photo-frame Dev",
+	"dockerComposeFile": [
+		"../docker-compose.dev.yml",
+		"../docker-compose.claude.yml"
+	],
+	"service": "app",
+	"workspaceFolder": "/workspaces/pi-photo-frame",
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-python.python",
+				"ms-python.vscode-pylance"
+			]
+		}
+	},
+	"remoteUser": "app",
+	"postStartCommand": "setsid bash .devcontainer/start-vnc.sh > /tmp/vnc.log 2>&1"
+}

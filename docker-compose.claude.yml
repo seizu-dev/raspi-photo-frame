@@ -1,0 +1,16 @@
+# devcontainer-claude-config スキルのテンプレートを本プロジェクト向けに調整したもの。
+# 差分: マウント先を非root ユーザー（app, uid 1000）の home に合わせている。
+#
+# HOST_CLAUDE_DIR 未設定 -> claude-config（名前付きボリューム / ホスト非干渉）
+# HOST_CLAUDE_DIR=パス  -> そのパスを /home/app/.claude へ bind mount（ホスト設定を共有）
+#
+# ホスト側でシェルスクリプトは実行しない。Docker Compose の変数補間
+# ${HOST_CLAUDE_DIR:-claude-config} だけで分岐するため、macOS / Linux / WSL / Windows
+# のいずれでも同一に動く。設定は .env（gitignore 済み）で行う。
+services:
+  app:
+    volumes:
+      - ${HOST_CLAUDE_DIR:-claude-config}:/home/app/.claude:cached
+
+volumes:
+  claude-config:

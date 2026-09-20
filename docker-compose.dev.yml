@@ -1,0 +1,21 @@
+# 階層1（Dev Container）用サービス。デバイスパススルー・group_add は書かない
+# （Windows ホストに /dev/dri は存在しない）。本番用の docker-compose.yml とは
+# 独立したファイルであり、こちらを変更しても本番構成には影響しない。
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+    volumes:
+      # ワークスペースを bind mount する。dev イメージにはソースを COPY していない。
+      - .:/workspaces/pi-photo-frame:cached
+    ports:
+      - "6080:6080"   # noVNC (http://localhost:6080/vnc.html?show_dot=true)
+      - "5900:5900"   # VNC
+    # IMMICH_BASE_URL / IMMICH_API_KEY は既存のセルフホスト Immich を指す。
+    # 開発用の Immich は別途立てない。
+    env_file:
+      - .env
+    command: sleep infinity
+    init: true

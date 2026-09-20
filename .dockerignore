@@ -1,0 +1,11 @@
+.git
+.claude
+.devcontainer
+tools
+cache
+config
+.env
+*.log
+.reference
+__pycache__
+*.pyc

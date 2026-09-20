@@ -1,0 +1,69 @@
+# 実証済みの docker run オプション群（SPECIFICATION.md 3.4）を1対1で構成ファイルに落としたもの。
+# 各行に「なぜ要るか」のコメントを付ける。デバッグ中にうっかり消されるのを防ぐため
+# （.claude/architecture.md「対で更新が必要な箇所」参照）。
+services:
+  app:
+    build: .
+    image: pi-photo-frame:latest
+    container_name: pi-photo-frame
+    # OS 起動後に Docker デーモンの起動へ委ねる。systemd ユニットは作らない（SPECIFICATION 7.1）。
+    restart: unless-stopped
+    # ゾンビプロセス回収用の init を有効化し、SIGTERM が確実にアプリへ届くようにする。
+    init: true
+
+    # 実証済みの --user 1000:1000。非rootのまま描画・タッチが成立することを確認済み（9-6）。
+    user: "1000:1000"
+
+    # GID はホスト固有の実測値（SPECIFICATION 9-8）。ずれていたら .env で上書きする。
+    # 実機での確認コマンド: getent group video render input gpio
+    group_add:
+      - "${GID_VIDEO:-44}"   # video  -> /dev/dri/card0（描画）
+      - "${GID_RENDER:-992}" # render -> /dev/dri/renderD128（描画）
+      - "${GID_INPUT:-996}"  # input  -> /dev/input/*（タッチ）
+      - "${GID_GPIO:-986}"   # gpio   -> /dev/gpiochip0（人感センサー。2026-09-03 実機でエッジ検知まで確認済み）
+
+    # --privileged は使わない（.claude/architecture.md 禁止パターン）。
+    # 必要最小限のデバイスのみパススルーする。
+    devices:
+      - /dev/dri:/dev/dri         # KMSDRM 描画（9-6）
+      - /dev/input:/dev/input     # USB タッチ入力（9-2）
+      # gpiochip0 は人感センサー用。2026-09-03 に実機（階層3）でエッジ検知まで確認済み。
+      # 起動しない場合はまずこの行を外して切り分けること。
+      - /dev/gpiochip0:/dev/gpiochip0
+
+    volumes:
+      # 無いと SDL2 が入力デバイスを列挙できない（9-2 で必須と実証済み）
+      - /run/udev:/run/udev:ro
+      # settings.json を人が編集できるように bind mount（秘匿情報のためイメージに焼き込まない）
+      - ./config:/config
+      # named volume。再作成のたびに再ダウンロードして 2.4GHz Wi-Fi の帯域を浪費しないため
+      - photo-cache:/cache
+      # 時計表示を JST にする。tzdata パッケージを別途入れずに済ませる
+      - /etc/localtime:/etc/localtime:ro
+
+    # イメージ既定値と重複するが、管理 UI 上で値が見えることに意味がある
+    environment:
+      SDL_VIDEODRIVER: kmsdrm
+      # 必須。既定の opengl ではテクスチャ描画が例外も出さずに無視される（9-10）
+      SDL_RENDER_DRIVER: opengles2
+      PYTHONUNBUFFERED: "1"
+      PF_CONFIG_DIR: /config
+      PF_CACHE_DIR: /cache
+
+    # IMMICH_BASE_URL / IMMICH_API_KEY 等の秘匿情報。.env.sample からコピーして使う
+    env_file:
+      - .env
+
+    # SD カードの寿命対策。ログを無制限に書き続けさせない
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    # mem_limit はあえて書かない。実機は cgroup_disable=memory で起動しており
+    # メモリ cgroup が無効なため、書いても機能しない（SPECIFICATION.md 5.4）。
+    # メモリ実態は docker stats ではなく main.py が出す VmRSS ログを正とする。
+
+volumes:
+  photo-cache:

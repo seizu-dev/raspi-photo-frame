@@ -1,0 +1,20 @@
+# GPIO系（gpiozero/lgpio）は今回のスコープ外。
+# lgpio 0.2.2.0 に cp313 aarch64 wheel が無い（cp39〜cp312のみ）ため、
+# 導入する場合は motion_sensor.py の移植タスクで builder ステージごと追加する。
+# evdev も入れない。タッチは SDL2 の FINGERDOWN/FINGERUP から取得できることが
+# 実機で確認済み（SPECIFICATION.md 9-2）。
+# psutil も入れない。show_memory_usage は /proc/self/status の VmRSS で足りる。
+
+# 実機で aarch64 wheel がビルドなしで入ることを確認済み（SDL 2.32.10 / Python 3.13.15）
+pygame-ce==2.5.8
+
+# photo-frame の pin を初期値として踏襲。
+# cp313 aarch64 wheel の有無は未確認。`docker compose build` の --only-binary=:all: で
+# 失敗した場合はバージョンを上げて再確認すること。
+requests==2.32.5
+Pillow==10.4.0
+
+# 人感センサー（AM312）。libgpiod v2 の公式バインディング。
+# lgpio には cp313 aarch64 wheel が無く builder ステージが必要になるため採用しなかった。
+# gpiod の wheel は libgpiod を static link しており、apt の追加パッケージは要らない。
+gpiod==2.5.0

@@ -1,0 +1,14 @@
+[Unit]
+Description=Disable framebuffer console and clear the framebuffer for pi-photo-frame
+Documentation=https://github.com/surface0/pi-photo-frame
+After=local-fs.target
+# アプリが DRM master を握る前に実行する必要がある
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/pf-fbcon-off.sh
+
+[Install]
+WantedBy=multi-user.target
