@@ -203,16 +203,26 @@ nothing about how the device behaves.
 - [.claude/architecture.md](.claude/architecture.md) — settled technical decisions,
   forbidden patterns, and the list of places that must be changed together
 - [.claude/coding-style.md](.claude/coding-style.md) — coding conventions
+- [.claude/workflows.md](.claude/workflows.md) — operational procedures for the device
+  (SSH, deployment, measurement commands) and the three-tier verification environment
 - [tools/verification/README.md](tools/verification/README.md) — verification scripts
 
 **These documents are written in Japanese.** This README is the only English
 document in the repository.
 
-Operational procedures for the device (SSH, deployment, measurement commands) and the
-development log (working context, known issues) are kept in a private repository,
-because they contain details about a home network. Comments and documents here still
-refer to `.claude/workflows.md` and `.claude/context/known-issues.md` as sources;
-those files are not part of this repository.
+`.claude/workflows.md` is part of this repository, but the actual connection
+details it uses are placeholder variables (`$PF_HOST`, `$PF_HOST_TUNNEL`,
+`$PF_REMOTE_DIR`, `$PF_REMOTE_HOME`). If you use it against your own device, define
+those same variable names for your own connection details.
+
+Only the development log and the actual connection values are private: under
+`.claude/context/`, `current-sprint.md` (working context), `known-issues.md` (known
+issues and measurements taken), and `environment.md` (the actual connection values).
+These contain details about a home network, so they are kept in a separate
+repository and cloned into `.claude/context/` to overlay on top of this one.
+Comments and documents here still refer to `.claude/context/known-issues.md` as a
+source; that file does not exist unless you have cloned it. **Building and running
+the app is unaffected either way** — `.claude/context/` is not required for either.
 
 ## Design notes
 

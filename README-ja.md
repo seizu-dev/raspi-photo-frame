@@ -189,13 +189,22 @@ GPU・RAM がすべて異なるため、階層1で動いたことを根拠に実
 - [.claude/architecture.md](.claude/architecture.md) — 確定した技術的決定事項と禁止パターン、
   「対で更新が必要な箇所」の一覧
 - [.claude/coding-style.md](.claude/coding-style.md) — コーディング規約
+- [.claude/workflows.md](.claude/workflows.md) — 実機の運用手順（SSH・デプロイ・実測コマンド）と
+  検証環境の3階層
 - [tools/verification/README.md](tools/verification/README.md) — 検証用スクリプト
 
-実機の運用手順（SSH・デプロイ・実測コマンド）と開発記録（作業コンテキスト・既知の問題）は、
-自宅環境の情報を含むため非公開リポジトリで管理しています。
-コードのコメントやドキュメントに `.claude/workflows.md` /
-`.claude/context/known-issues.md` への参照が残っているのは出典を示すもので、
-このリポジトリには含まれません。
+`.claude/workflows.md` はこのリポジトリに含まれていますが、実際に使う接続先は
+`$PF_HOST` / `$PF_HOST_TUNNEL` / `$PF_REMOTE_DIR` / `$PF_REMOTE_HOME` という
+プレースホルダ変数になっています。自分の環境で使うときは、同じ変数名で自分の
+接続先を定義すればよいです。
+
+非公開なのは開発記録と接続先の実値だけです。具体的には `.claude/context/` 配下の
+`current-sprint.md`（作業コンテキスト）/ `known-issues.md`（既知の問題・実測値）/
+`environment.md`（接続先の実値）。これらは自宅環境の情報を含むため別リポジトリで
+管理し、`.claude/context/` へ clone して重ねる構成になっています。
+コードのコメントやドキュメントに `.claude/context/known-issues.md` への参照が
+残っているのは出典を示すもので、clone していない環境にはそのファイルは
+存在しません。**`.claude/context/` が無くてもビルド・実行には一切影響しません。**
 
 ## 技術的な要点
 

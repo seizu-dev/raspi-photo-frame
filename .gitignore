@@ -18,3 +18,10 @@ cache/
 
 # 先行プロジェクト photo-frame の参照用 clone（移植元。追跡しない）
 /.reference/
+
+# 非公開オーバーレイ（開発記録・実機の接続情報・秘匿検査の hook）。
+# 別リポジトリを .claude/context/ へ clone して重ねる。
+# セットアップ手順は .claude/workflows.md の「非公開オーバーレイの運用」を参照。
+# この2行が無いと非公開情報がそのまま公開リポジトリへコミットされる。
+/.claude/context/
+/CLAUDE.local.md

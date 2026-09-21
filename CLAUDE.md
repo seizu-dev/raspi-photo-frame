@@ -6,12 +6,14 @@ Raspberry Pi Zero 2 W + Immich のデジタルフォトフレーム。
 
 @.claude/architecture.md
 @.claude/coding-style.md
+@.claude/workflows.md
 
-**実機の運用手順（SSH・デプロイ・実測コマンド）と開発記録（作業コンテキスト・
-既知の問題）は、自宅環境の情報を含むため非公開リポジトリで管理している。**
-コード中のコメントやドキュメントに `.claude/workflows.md` /
-`.claude/context/known-issues.md` への参照が残っているのは、その出典を示すもので、
-このリポジトリには含まれない。
+作業コンテキスト（`current-sprint.md`）・既知の問題（`known-issues.md`）・
+実機の接続情報（`environment.md`）は自宅環境の情報を含むため**非公開リポジトリで管理**し、
+`.claude/context/` へ clone して重ねる構成になっている。これらは `CLAUDE.local.md`
+（`.gitignore` 対象）から読み込む。コード中のコメントやドキュメントに
+`.claude/context/known-issues.md` への参照が残っているのはその出典を示すもので、
+clone していない環境にはそのファイルは存在しない。
 
 完全な仕様は `SPECIFICATION.md` を参照する。
 
@@ -32,8 +34,10 @@ Raspberry Pi Zero 2 W + Immich のデジタルフォトフレーム。
 
 ## エージェントへの指示
 
-- **状態の維持**: 進捗・技術的決定・完了タスクは記録し、最新の状態に保つこと
-  （記録の置き場所は非公開リポジトリ側にある）。
+- **状態の維持**: 進捗・技術的決定・完了タスクは `.claude/context/` 配下に記録し、
+  最新の状態に保つこと（「セッション終了して」で `session-record` スキルが使える）。
+  **ただし `.claude/context/` は非公開リポジトリの clone であり、常に存在するとは限らない。**
+  clone していない環境では記録先が無いので、書き込まずにその旨をユーザーへ知らせること。
 - **軽量化の優先順位**: RAM 512MB が最大の制約。削減効果はフレームワーク選択よりも
   「画像バッファの枚数」と「画像パイプライン」の方が大きい。**OS が見えるのは 416MB**。
   512MB は OS → Docker デーモン → 他コンテナ → 本アプリ の順に消費される。
