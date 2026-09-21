@@ -23,6 +23,9 @@ set -u
 APP_DIR="${APP_DIR:-$HOME/pi-photo-frame}"
 BENCH_DIR="${APP_DIR}/bench"
 COUNTS="${*:-13 50 150 300 600}"
+# ベンチが読むのはイメージ側の src/ なので、ソースを直した場合は先に deploy.sh でイメージを
+# 焼き直すこと（ワークフローが GHCR へ push した latest を使うなら特に何もしなくてよい）。
+IMAGE="${IMAGE:-ghcr.io/seizu-dev/raspi-photo-frame:latest}"
 
 cd "${APP_DIR}" || exit 1
 mkdir -p "${BENCH_DIR}/cache" "${BENCH_DIR}/config"
@@ -57,7 +60,7 @@ for N in ${COUNTS}; do
         -e SDL_VIDEODRIVER=kmsdrm \
         -e SDL_RENDER_DRIVER=opengles2 \
         -e PYTHONUNBUFFERED=1 \
-        pi-photo-frame:latest \
+        "${IMAGE}" \
         python tools/verification/album_grid_bench.py \
             --count "${N}" \
             --cache-dir /bench-cache \

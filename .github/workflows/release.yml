@@ -1,0 +1,72 @@
+# タグ（v*）を push すると arm64 イメージをビルドして GHCR へ push し、GitHub Release を作る。
+#
+# なぜ arm64 のネイティブビルドが GitHub Actions で完結するか:
+# ubuntu-24.04-arm は 2025-08-07 に公開リポジトリ向けに GA（無料・無制限）になった
+# ホストランナーで、QEMU クロスビルドを挟まずに実機と同じ arm64 でビルドできる。
+# 実機（Zero 2 W）上のネイティブビルドは 10 分以上かかり CPU 飽和で SSH が落ちる
+# （2026-09-19 にビルド中ハングも発生した）ため、これを正規のビルド経路にする。
+# 実機ネイティブビルド（docker compose build）は GHCR に届かないときの
+# フォールバックとして残す（.claude/architecture.md 参照）。
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # イメージ名は小文字である必要がある。owner/repo は現状すでに小文字だが、
+      # 将来 owner が変わっても壊れないよう明示的に小文字化しておく。
+      - name: Compute image name (lowercase)
+        id: image
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Extract Docker metadata (tags / labels)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.image.outputs.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          # Dockerfile は base -> dev -> runtime の3ステージ構成。target を指定しないと
+          # 最終ステージ（現状は runtime）が選ばれるが、ステージ順に暗黙で依存しないよう
+          # ここでは明示する（.claude/architecture.md「対で更新が必要な箇所」参照）。
+          target: runtime
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag

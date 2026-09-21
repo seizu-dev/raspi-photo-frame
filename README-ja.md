@@ -94,13 +94,24 @@ getent group video render input gpio
 
 ### 起動
 
+イメージはタグ push を契機に GitHub Actions が arm64 ネイティブビルドして GHCR へ
+公開しているので、通常は pull するだけで済みます。
+
 ```bash
-docker compose build     # ARM64 実機上でネイティブビルドします（QEMU は不要です）
+docker compose pull
 docker compose up -d
 docker compose logs -f
 ```
 
 自動起動は `restart: unless-stopped` によります。systemd ユニットは作りません。
+
+**実機でのネイティブビルドはフォールバックです**（そのタグの GHCR イメージがまだ無い場合や、
+手元の変更を試したい場合など）。
+
+```bash
+docker compose build     # ARM64 実機上でネイティブビルドします（QEMU は不要です）
+docker compose up -d
+```
 
 **Zero 2 W ではビルドに 10 分以上かかります。** その間 CPU が飽和するため、
 SSH 越しに実行する場合は `setsid nohup` で切り離し、ログをポーリングして回収してください。

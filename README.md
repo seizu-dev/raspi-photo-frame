@@ -100,13 +100,24 @@ getent group video render input gpio
 
 ### Running it
 
+The image is published to GHCR by a GitHub Actions release workflow that builds a
+native arm64 image on tag push, so pulling it is the normal path:
+
 ```bash
-docker compose build     # builds natively on the ARM64 device; no QEMU needed
+docker compose pull
 docker compose up -d
 docker compose logs -f
 ```
 
 Startup on boot is handled by `restart: unless-stopped`. There is no systemd unit.
+
+**Building natively on the device is a fallback** (e.g. if the GHCR image for a tag
+isn't published yet, or you're testing a local change):
+
+```bash
+docker compose build     # builds natively on the ARM64 device; no QEMU needed
+docker compose up -d
+```
 
 **A build takes more than ten minutes on a Zero 2 W** and saturates the CPU while it
 runs. If you are working over SSH, detach it with `setsid nohup` and poll the log

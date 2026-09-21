@@ -3,8 +3,12 @@
 # （.claude/architecture.md「対で更新が必要な箇所」参照）。
 services:
   app:
+    # GHCR から pull するのが正規経路（.github/workflows/release.yml がタグ push で
+    # arm64 イメージを ghcr.io へ push する）。`build: .` は残してあり、GHCR に
+    # まだ届いていないタグや手元の修正を試すときは実機ネイティブビルドへ
+    # フォールバックできる（`docker compose build` すれば従来どおり動く）。
     build: .
-    image: pi-photo-frame:latest
+    image: ghcr.io/seizu-dev/raspi-photo-frame:${PF_IMAGE_TAG:-latest}
     container_name: pi-photo-frame
     # OS 起動後に Docker デーモンの起動へ委ねる。systemd ユニットは作らない（SPECIFICATION 7.1）。
     restart: unless-stopped
