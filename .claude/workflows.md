@@ -125,6 +125,29 @@ sudo systemctl daemon-reload && sudo systemctl enable --now pf-fbcon-off.service
 
 ### デプロイ
 
+**通常の更新（正規経路）は GHCR から pull する。**
+
+```bash
+docker compose pull
+docker compose up -d
+docker compose logs -f
+```
+
+イメージは `v*` タグの push で `.github/workflows/release.yml` がビルドし、
+`ghcr.io/seizu-dev/raspi-photo-frame` へ push する（`ubuntu-24.04-arm` ホストランナーの
+ネイティブビルドで QEMU は不要）。**リリースするとき**は次のとおり。
+
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+**GHCR パッケージは初回は非公開で作られる。** 実機からの pull が匿名のままで済むよう、
+GitHub の Package settings（リポジトリの Packages タブ）で Public に変更しておくこと。
+非公開のままだと実機で `docker login` が必要になる。
+
+**実機ネイティブビルドはフォールバック**（GHCR に届いていないタグ・手元の修正を試すときなど）。
+
 ```bash
 # ARM64 実機上でネイティブビルド（QEMU 不要）
 docker compose build

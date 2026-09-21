@@ -30,7 +30,8 @@ clone していない環境にはそのファイルは存在しない。
 - 実行形態: **Docker コンテナ**（`restart: unless-stopped`。**`mem_limit` は cgroup 無効のため使用不可**）
 - 実機: **SSH でアクセス可。** Docker + リモート管理 UI のエージェント導入済みでリモート運用中
 - Photo Service: Immich (Self-Hosted)
-- CI: なし
+- CI: `v*` タグ push で GitHub Actions（arm64 ホストランナー）が実機と同じ arm64 イメージを
+  ビルドして GHCR へ push し、GitHub Release を作る（`.github/workflows/release.yml`）
 
 ## エージェントへの指示
 

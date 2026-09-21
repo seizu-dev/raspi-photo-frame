@@ -140,7 +140,15 @@ Immich からの画像取得は帯域制約を前提とし、**原寸画像を�
 #### 採用の利点
 
 *   リモート管理 UI 経由でリモートから再デプロイ・ログ確認・再起動ができる。
-*   ARM64 実機上でネイティブビルドできるため、QEMU によるクロスビルドが不要。
+*   **正規のビルド経路は GitHub Actions。** `v*` タグを push すると
+    `ubuntu-24.04-arm`（公開リポジトリで無料・GA の arm64 ホストランナー）が
+    実機と同じ arm64 でネイティブビルドし、GHCR（`ghcr.io/seizu-dev/raspi-photo-frame`）
+    へ push する。実機は `docker compose pull` で取得するだけでよく、
+    **QEMU によるクロスビルドは引き続き不要**（ホストランナー自体が arm64 のため）。
+    実機（Zero 2 W）上でのネイティブビルドは apt/pip で 10 分以上かかり CPU 飽和で
+    SSH（Cloudflare Tunnel）が落ちる（ビルド中のハングも観測している）ため、
+    `docker compose build` は GHCR に届かないときのフォールバックとして残す
+    （第10.4節参照）。
 *   開発 Dev Container と実行コンテナで同じベースイメージ定義を共有できる。
 
 #### 採用に伴うコスト（設計上の前提）
@@ -896,7 +904,14 @@ Kivy 由来の依存（GStreamer 一式 / `libmtdev` / wayland / `npm`）は持�
 1.  リポジトリを実機へ配置し、`.env.sample` → `.env`、
     `config/settings.sample.json` → `config/settings.json` をコピーする。
     `env_file` は必須指定のため、`.env` が無いと起動しない。
-2.  ARM64 実機上で `docker compose build`（ネイティブビルド。QEMU 不要）。
+2.  イメージを用意する。**正規の経路は GHCR から pull すること**
+    （`docker compose pull`）。`v*` タグを push すると `.github/workflows/release.yml`
+    が `ubuntu-24.04-arm` ホストランナーで arm64 イメージをビルドし
+    `ghcr.io/seizu-dev/raspi-photo-frame` へ push する。**GHCR パッケージは
+    初回は非公開で作られるため、GitHub の Package settings で Public にしておく**
+    （非公開のままだと実機で `docker login` が必要になる）。
+    GHCR に届いていないタグや手元の修正を試すときは、実機ネイティブビルド
+    （`docker compose build`。QEMU 不要）へフォールバックできる。
     **ビルド中は CPU 飽和で SSH（Cloudflare Tunnel）が落ちるため、
     `setsid nohup` で切り離してログをポーリングで回収する。**
 3.  `docker compose up -d` で起動する。デバイスパススルーと `group_add` は
@@ -910,3 +925,7 @@ Kivy 由来の依存（GStreamer 一式 / `libmtdev` / wayland / `npm`）は持�
 自動起動は `restart: unless-stopped` による。GID（`video` 44 / `render` 992 /
 `input` 996 / `gpio` 986）はホスト固有のため、別機ではまず
 `getent group video render input gpio` で確認し、`.env` で上書きする。
+
+**通常の更新**は `docker compose pull && docker compose up -d`。
+**新しいバージョンをリリースするとき**は `git tag vX.Y.Z && git push origin vX.Y.Z`
+で GitHub Actions を起動する。

@@ -57,7 +57,14 @@ Docker 基盤 約75MB と他コンテナを引いた残りがアプリの取り�
     -   OS は Raspberry Pi OS Lite **ARM64 (64bit) で確定**。32bit との比較は行わない。
     -   自動起動は `restart: unless-stopped` による。systemd ユニットは作らない。
     -   **`mem_limit` は使用できない**（実機は `cgroup_disable=memory` で起動）。
-    -   ARM64 実機上でネイティブビルドする（QEMU クロスビルドは不要）。
+    -   **正規のビルド経路は GitHub Actions。** `v*` タグを push すると
+        `ubuntu-24.04-arm`（公開リポジトリで無料・GA の arm64 ホストランナー）が
+        実機と同じ arm64 でネイティブビルドし、GHCR（`ghcr.io/seizu-dev/raspi-photo-frame`）
+        へ push する。実機は `docker compose pull` で取得するだけでよい。
+        **QEMU クロスビルドは引き続き不要**（ホストランナー自体が arm64 のため）。
+        Zero 2 W 上でのネイティブビルドは apt/pip で 10 分以上かかり CPU 飽和で
+        SSH（Cloudflare Tunnel）が落ちる（2026-09-19 にはビルド中のハングも発生した）ため、
+        実機ビルド（`docker compose build`）は GHCR に届かないときのフォールバックとして残す。
     -   デバイスは `/dev/dri`（描画）、`/dev/input/*`（タッチ）、`/dev/gpiochip*`（センサー）を
         パススルーし、`group_add` で `video` / `input` / `gpio` の GID を与える。
 
@@ -86,6 +93,7 @@ Docker 基盤 約75MB と他コンテナを引いた残りがアプリの取り�
 ## ディレクトリ構成
 
 ```
+.github/workflows/release.yml  タグ push で arm64 イメージをビルドし GHCR へ push・Release 作成
 Dockerfile                  実行イメージ（arm64 / python:3.13-slim ベース）
 docker-compose.yml          デバイスパススルー・非root・ボリューム定義
 main.py                     アプリケーションループ / 画面遷移
@@ -245,6 +253,11 @@ src/
     ↔ `docker-compose.dev.yml` の `target: dev`。
     `runtime` を最後に置く前提を崩すと、`target` を指定していない本番の
     `docker compose build` が別のステージ（VNC 入りの `dev` 等）をビルドしてしまう。
+-   `.github/workflows/release.yml` の `target: runtime` / `platforms: linux/arm64`
+    ↔ `Dockerfile` のステージ名（`runtime`）↔ `docker-compose.yml` の `image:`
+    （`ghcr.io/seizu-dev/raspi-photo-frame`）。イメージ名やステージ名を変えると、
+    ワークフロー・`docker-compose.yml`・`tools/verification/album_bench_runner.sh`
+    の3か所がずれる（後者は `IMAGE` 環境変数で上書きできるが既定値は揃えてある）。
 -   `dev` ステージの `SDL_RENDER_DRIVER=opengl`（x86 / llvmpipe 用）↔ `runtime` ステージ /
     `docker-compose.yml` の `SDL_RENDER_DRIVER=opengles2`（VideoCore IV 用）。
     階層1と階層3で値が異なるのが正しい。デバッグ中に一方の値をもう一方へ揃えないこと。
