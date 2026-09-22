@@ -91,6 +91,18 @@ cp .env.sample .env                              # put your Immich URL and API k
 cp config/settings.sample.json config/settings.json
 ```
 
+Your Immich API key only needs three permissions (confirmed against Immich 2.7.5's OpenAPI spec):
+
+| Permission | API it backs | Used for |
+|---|---|---|
+| `album.read` | `GET /api/albums`, `GET /api/albums/{id}` | Album list, album photos, daily pickup |
+| `asset.read` | `POST /api/search/metadata` | Favorites (`source: "favorites"`) |
+| `asset.view` | `GET /api/assets/{id}/thumbnail` | Photo bodies (`preview`) and thumbnails |
+
+Nothing else is used, including `asset.download`. If a permission is missing, Immich
+responds with `403` and `Missing required permission: <name>`
+(`tools/verification/immich_probe.py` can help narrow it down).
+
 `GID_*` in `.env` holds device group IDs, and **these differ from host to host.**
 Check them on your own machine before filling them in:
 
