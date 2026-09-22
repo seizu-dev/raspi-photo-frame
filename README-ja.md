@@ -85,6 +85,17 @@ cp .env.sample .env                              # Immich の URL と API キー
 cp config/settings.sample.json config/settings.json
 ```
 
+Immich の API キーには次の3つの権限があれば足ります（Immich 2.7.5 の OpenAPI スペックで確認）。
+
+| 権限 | 使う API | 用途 |
+|---|---|---|
+| `album.read` | `GET /api/albums`、`GET /api/albums/{id}` | アルバム一覧・アルバムの写真・デイリーピックアップ |
+| `asset.read` | `POST /api/search/metadata` | お気に入り（`source: "favorites"`） |
+| `asset.view` | `GET /api/assets/{id}/thumbnail` | 写真本体（`preview`）とサムネイル |
+
+`asset.download` などそれ以外の権限は使いません。権限が足りないと Immich は `403` と
+`Missing required permission: <権限名>` を返します（`tools/verification/immich_probe.py` で切り分けられます）。
+
 `.env` の `GID_*` はデバイスのグループ ID で、**ホストごとに異なります。**
 必ず実機で確認してから設定してください。
 
