@@ -172,6 +172,10 @@ settings screen.
 | `power_saving_timeout` | `300` | Seconds of inactivity before sleeping |
 | `display_wakeup_delay` | `3.0` | Seconds to wait after waking before accepting input |
 | `motion_sensor_enabled` | `true` | Enable or disable the motion sensor |
+| `power_schedule_enabled` | `false` | Keep the display always on during a daily time window (for signage use) |
+| `power_schedule_start` | `540` | Start of the always-on window, in minutes since midnight (`540` = 09:00) |
+| `power_schedule_end` | `1080` | End of the always-on window, in minutes since midnight (`1080` = 18:00) |
+| `power_schedule_off_hours` | `normal` | Behavior outside the window (`normal` / `force_off`) |
 | `photo_cache_max_mb` | `512` | Image cache limit in MB (`0` means unlimited) |
 | `cache_lifetime_hours` | `24` | How long a cached photo list stays valid |
 | `daily_pickup_count` | `3` | Albums picked per day in daily pickup mode |

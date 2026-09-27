@@ -18,6 +18,7 @@ UI の多言語対応（日本語 / 英語）と日時の書式選択
 import logging
 import time
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -202,6 +203,30 @@ def format_time(when: Any = None, fmt: str = DEFAULT_TIME_FORMAT) -> str:
     return f'{hour12}:{minute:02d} {period}'
 
 
+def format_minutes(minutes: Any, fmt: str = DEFAULT_TIME_FORMAT) -> str:
+    """
+    「0時からの経過分」を時刻表示に整形する。基本設定画面の
+    `power_schedule_start` / `power_schedule_end` スライダーの表示に使う
+    （分で持つ理由は `src/config_manager.py` の該当コメントを参照）。
+
+    `format_time()` は `time.struct_time` 風の `tm_hour` / `tm_min` を持つ
+    オブジェクトを想定しているため、`SimpleNamespace` で最小限のダミーを作って渡す。
+
+    不正値（非数値・`bool`）は `known-issues.md` の「`transition` に文字列以外が
+    入るとクラッシュループしていた」と同じ轍を踏まないよう `isinstance` で
+    先に確かめ、例外を出さず 00:00 側へフォールバックする。範囲外の値
+    （壊れた設定ファイル等）は 1440 で丸めて 0〜1439 に収める。
+    """
+    if isinstance(minutes, bool) or not isinstance(minutes, (int, float)):
+        _warn_once('invalid_minutes', repr(minutes),
+                   '不正な power_schedule の分数です。0 として扱います: %r', minutes)
+        minutes = 0
+
+    total = int(minutes) % 1440  # Python の % は負数でも 0〜1439 の範囲に収まる
+    struct = SimpleNamespace(tm_hour=total // 60, tm_min=total % 60)
+    return format_time(struct, fmt)
+
+
 def format_date(iso_text: str | None, fmt: str = DEFAULT_DATE_FORMAT) -> str:
     """
     Immich の ISO8601 文字列（例 `2024-03-12T15:55:18.092Z`）を書式に従って整形する。
@@ -304,6 +329,18 @@ _TEXTS: dict[str, dict[str, str]] = {
     'settings.row.motion_sensor_enabled': {
         'ja': '人感センサーを有効にする', 'en': 'Enable motion sensor',
     },
+    'settings.row.power_schedule_enabled': {
+        'ja': '時間帯で常時点灯', 'en': 'Scheduled always-on',
+    },
+    'settings.row.power_schedule_start': {
+        'ja': '常時点灯の開始', 'en': 'Always-on start',
+    },
+    'settings.row.power_schedule_end': {
+        'ja': '常時点灯の終了', 'en': 'Always-on end',
+    },
+    'settings.row.power_schedule_off_hours': {
+        'ja': '時間帯外の動作', 'en': 'Outside schedule',
+    },
     'settings.row.daily_pickup_count': {
         'ja': 'デイリーピックアップ数', 'en': 'Daily pickup count',
     },
@@ -353,6 +390,9 @@ _TEXTS: dict[str, dict[str, str]] = {
     'value.photo_fit.contain': {'ja': '内接', 'en': 'Contain'},
     'value.photo_fit.cover': {'ja': '外接', 'en': 'Cover'},
     'value.photo_fit.smart': {'ja': 'スマート', 'en': 'Smart'},
+
+    'value.power_schedule_off_hours.normal': {'ja': '通常（自動消灯）', 'en': 'Auto sleep'},
+    'value.power_schedule_off_hours.force_off': {'ja': '強制消灯', 'en': 'Force off'},
 
     # 言語名は「今の言語で読めなくなって戻せなくなる」のを防ぐため、
     # ja / en のどちらで表示していても同じ文字列にする

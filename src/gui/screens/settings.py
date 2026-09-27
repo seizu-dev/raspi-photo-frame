@@ -125,6 +125,18 @@ _ROWS: list[tuple[str, str, str, dict]] = [
     ('slider', 'display_wakeup_delay', 'settings.row.display_wakeup_delay',
      dict(min_value=0.0, max_value=10.0, step=0.5, is_float=True)),
     ('toggle', 'motion_sensor_enabled', 'settings.row.motion_sensor_enabled', {}),
+    ('toggle', 'power_schedule_enabled', 'settings.row.power_schedule_enabled', {}),
+    # format='minutes' は _build() で Slider の format_value に解決される
+    # トークン（Slider 自体のコンストラクタ引数ではないので pop してから渡す）。
+    # 0〜1410分・30分刻み（= 00:00〜23:30）。
+    ('slider', 'power_schedule_start', 'settings.row.power_schedule_start',
+     dict(min_value=0, max_value=1410, step=30, format='minutes')),
+    ('slider', 'power_schedule_end', 'settings.row.power_schedule_end',
+     dict(min_value=0, max_value=1410, step=30, format='minutes')),
+    # power_schedule.py の OFF_HOURS_VALUES と同じ並び。並行作業のため import せず
+    # display_mode と同じくリテラルで書く（.claude/plans/structured-napping-beacon.md）。
+    ('spinner', 'power_schedule_off_hours', 'settings.row.power_schedule_off_hours',
+     dict(options=['normal', 'force_off'])),
 
     ('header', '', 'settings.group.photos', {}),
     ('slider', 'daily_pickup_count', 'settings.row.daily_pickup_count',
@@ -253,9 +265,15 @@ class SettingsScreen:
 
             if kind == 'slider':
                 row_h = slider_row_height
+                # 'format' は Slider のコンストラクタ引数ではなく、この画面だけが
+                # 解釈するトークン。渡したまま **kwargs すると TypeError になるため
+                # ここで pop してから Slider.format_value へ変換する。
+                slider_kwargs = dict(kwargs)
+                fmt_token = slider_kwargs.pop('format', None)
+                format_value = self._format_minutes_value if fmt_token == 'minutes' else None
                 widget = Slider(
                     self._r, pg.Rect(content_pad, y, content_width, row_h - row_spacing),
-                    value=value, label=label_text, **kwargs)
+                    value=value, label=label_text, format_value=format_value, **slider_kwargs)
                 self._scroll.add(widget)
 
             elif kind == 'toggle':
@@ -325,6 +343,17 @@ class SettingsScreen:
             # 最大スクロール量は ScrollView.max_scroll を参照する（式の複製を避ける。
             # .claude/plans/delegated-leaping-perlis.md 参照）。
             self._scroll.scroll_y = min(scroll_y, self._scroll.max_scroll)
+
+    def _format_minutes_value(self, value: float) -> str:
+        """
+        power_schedule_start / _end スライダー用の表示書式。
+
+        `Slider.draw()` から毎フレーム呼ばれるクロージャとして渡すため、
+        `time_format` を**呼び出しのたびに** `self._config` から読む
+        （ビルド時の値を束縛すると、`time_format` を変えてもこの2行だけ
+        古い書式のまま取り残される）。
+        """
+        return i18n.format_minutes(value, self._config.get('time_format', i18n.DEFAULT_TIME_FORMAT))
 
     def _process_changes(self) -> None:
         """ UP イベントの後に呼ぶ。値が変わったウィジェットだけ保存して通知する """

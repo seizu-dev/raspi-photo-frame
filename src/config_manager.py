@@ -70,6 +70,19 @@ class ConfigManager:
             # 実行中にこの値を切り替えた場合は stop() / start() で GPIO の解放・再取得も行う。
             # 解放するのは、センサーを外したり別プロセスで観測したりできるようにするため。
             "motion_sensor_enabled": True,
+            # 時間帯による省電力モードの切り替え（デジタルサイネージ運用向け。
+            # 当初の機能仕様の範囲外で、ユーザーの要望から追加した）。
+            # 既定は無効で、無効のときは現行どおり power_saving_enabled /
+            # power_saving_timeout による無操作消灯のみが働く（src/power_schedule.py）。
+            "power_schedule_enabled": False,
+            # start / end は「0時からの経過分」で持つ。Slider にそのまま渡せる数値に
+            # するためで、"09:30" のような文字列だと min/max/step で扱えない。
+            # start < end は同日内の時間帯、start > end は日跨ぎ（例 22:00〜06:00）、
+            # start == end は「時間帯なし（常に時間帯外）」を意味する。
+            "power_schedule_start": 540,  # 09:00
+            "power_schedule_end": 1080,  # 18:00
+            # 時間帯外の挙動。'normal'（現行どおり自動消灯）/ 'force_off'（強制消灯）。
+            "power_schedule_off_hours": "normal",
             # コメント表示設定
             "comment_font_size": 24,
             # デイリーピックアップ設定

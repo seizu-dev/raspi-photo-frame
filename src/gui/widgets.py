@@ -29,7 +29,7 @@
 """
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import pygame as pg
 
@@ -241,6 +241,10 @@ class Slider(Widget):
     値は常に `step` の倍数へ丸める。呼び出し側（基本設定画面）は `changed` を見て
     ドラッグ確定（UP）のときだけ設定へ保存する（ドラッグ中の毎回保存は
     SD カードへの書き込みを増やすため避ける方針。ステップ2の担当）。
+
+    `format_value` は値の表示文字列だけを差し替えるフック（例: 分数を `09:30`
+    表示にする省電力の時間帯スライダー）。`None`（既定）のときは従来どおり
+    `f'{value:.1f}'` / `str(value)` を使い、出力は1文字も変わらない。
     """
 
     # ScrollView が未決状態から行き先を決めるとき、横方向の移動が縦方向以上なら
@@ -251,7 +255,8 @@ class Slider(Widget):
 
     def __init__(self, renderer: 'Renderer', rect: pg.Rect, min_value: float,
                  max_value: float, value: float, step: float = 1,
-                 is_float: bool = False, label: str = '') -> None:
+                 is_float: bool = False, label: str = '',
+                 format_value: Callable[[float], str] | None = None) -> None:
         super().__init__(rect)
         self._r = renderer
         self.min_value = min_value
@@ -259,6 +264,7 @@ class Slider(Widget):
         self.step = step
         self.is_float = is_float
         self.label = label
+        self._format_value = format_value
         self.value = self._quantize(value)
         self.changed = False
         self._dragging = False
@@ -336,7 +342,10 @@ class Slider(Widget):
                        knob_r * 2, knob_r * 2)
         self._r.fill_rect(knob, COLOR_KNOB, alpha=230)
 
-        value_str = f'{self.value:.1f}' if self.is_float else str(self.value)
+        if self._format_value is not None:
+            value_str = self._format_value(self.value)
+        else:
+            value_str = f'{self.value:.1f}' if self.is_float else str(self.value)
         self._value_text.set(value_str, self._r.px(UI_VALUE_FONT_SIZE))
         self._value_text.draw_right(self.rect.right, self.rect.y)
 
