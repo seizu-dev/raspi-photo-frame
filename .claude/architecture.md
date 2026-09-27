@@ -106,6 +106,7 @@ src/
   motion_sensor.py          AM312 人感センサー（gpiod で再実装）
   touch_watcher.py          /dev/input の直読み（新規。消灯中の復帰に必須）
   display_manager.py        ディスプレイ電源制御（再実装）
+  power_schedule.py         時間帯による省電力モードの判定（新規）
   gui/
     renderer.py             SDL のライフサイクル / テクスチャ / フォント / 入力正規化
     overlay.py              時計・カウンタ・説明文・ステータス・メモリ表示 / カウントダウンゲージ
@@ -128,6 +129,45 @@ src/
     `MotionSensor.start()` の戻り値ではなく「意図した状態」を別フラグで持つ契約である
     ことにも注意する（開発環境では `start()` が常に False を返すため、戻り値だけで
     判定すると常に無効扱いになってしまう）
+-   `settings.json` の `power_schedule_enabled` / `_start` / `_end` / `_off_hours`
+    （4キー）↔ `config_manager.py` の既定値 ↔ 基本設定画面のウィジェット ↔
+    `main.py` の `_update_power_saving()` の分岐 ↔ `power_schedule.py` の
+    `normalize()` の既定値。**設定値そのものの反映には `_on_setting_changed()` への
+    配線を持たない**（`power_saving_timeout` と同じく、`_update_power_saving()` が
+    毎ループ `config.get()` で読むため）。**ただし `_schedule_changed_by_user` の
+    印を立てるためだけに配線が要る**（次の bullet を参照。3点セットだけ足して
+    満足しないこと）。
+    `power_schedule_start` / `_end` は「0時からの分」（int）で持ち、Slider に
+    そのまま渡す契約（`"09:30"` のような文字列は min/max/step で扱えない）。
+    表示は `src/i18n.py` の `format_minutes()` が `time_format` に従って整形する
+    （`gui/widgets.py` の `Slider.format_value` フックを `settings.py` が
+    描画時にクロージャで渡す。ビルド時に `time_format` の値を束縛すると
+    `time_format` を変えても表示が古い書式のまま残る）。
+    **`power_schedule.py` の `MAX_MINUTE`（1410）↔ `settings.py` の `_ROWS` にある
+    `power_schedule_start` / `_end` の Slider の `max_value`（1410）も対。** Slider は
+    30分刻みで 23:30（1410分）までしか作れない（24:00 は選べない）ため、
+    `normalize()` の範囲チェックもこれに合わせてある。ここを
+    `MINUTES_PER_DAY - 1`（1439）のままにすると、Slider では絶対に作れない
+    1411〜1439 の値（`settings.json` を手編集した場合）を正規化が「有効」として
+    通してしまい、画面の表示可能範囲と設定ファイルの許容範囲がずれる
+-   `main.py` の `_update_power_saving()` が `power_schedule.MODE_FORCE_OFF` へ
+    遷移した瞬間に行う即消灯 ↔ **`_on_setting_changed()` が立てる
+    `self._schedule_changed_by_user` の印**。基本設定画面で `power_schedule_off_hours`
+    を強制消灯へタップで切り替えると、その操作自体で force_off への遷移が起きる。
+    ここで無条件に消灯すると、直後の force_off 本体の分岐がタッチ入力を見て
+    即座に再点灯してしまう（DPMS Off→On の連続 + `display_wakeup_delay` ぶんの
+    入力無効）。**最初は `TouchWatcher.consume_input()`（タッチ入力）で見分けようと
+    したが不十分だった**: Dev Container には入力デバイスが無く常に False、実機でも
+    `TouchWatcher` は別スレッドのため `_update_power_saving()` と同じループ反復で
+    同じ入力を読める保証が無い。`_on_setting_changed()` は
+    `SettingsScreen.handle_input()` の TAP_UP から同期的に呼ばれ、run() は
+    `_handle_events(now)` の直後に `_update_power_saving(now)` を呼ぶため、
+    ここで印を立てれば TouchWatcher の有無やスレッドのタイミングに依存せず
+    開発環境と実機で同じ挙動になる。印は `_update_power_saving()` の呼び出しごとに
+    必ず1回だけ下ろす（モード遷移が起きなかった回でも下ろす。次に本当に時刻境界で
+    遷移したときへ誤って持ち越さないため）。遷移時の即消灯は
+    **`not schedule_changed`（印が立っていないとき）に限る**契約にしてあるので、
+    この条件を外して「遷移したら常に消灯」に戻さないこと
 -   `gui/renderer.py` の `ui_scale` / `px()` ↔ レイアウト定数を使う側
     （`gui/widgets.py` / `gui/screens/menu.py` / `settings.py` / `album.py` /
     `gui/overlay.py`）。これらのモジュールの寸法定数は「基準解像度 1024x600 に

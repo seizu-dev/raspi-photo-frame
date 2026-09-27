@@ -463,6 +463,10 @@ photo-frame の `settings.json` を踏襲する。
     "power_saving_timeout": 300,
     "display_wakeup_delay": 3.0,
     "motion_sensor_enabled": true,
+    "power_schedule_enabled": false,
+    "power_schedule_start": 540,
+    "power_schedule_end": 1080,
+    "power_schedule_off_hours": "normal",
     "comment_font_size": 24,
     "daily_pickup_count": 3,
     "daily_pickup_date": "",
@@ -506,6 +510,12 @@ photo-frame では `transition` と `max_slides_in_memory` がどこからも参
 死んだキーになっていた。本実装では `max_slides_in_memory` を実際に使い、
 `transition` は本実装で5種類の遷移効果の選択キーとして使う（既定値 `crossfade`）。
 
+**時間帯による省電力の切り替え**（`power_schedule_*` 4キー、既定は無効）は
+デジタルサイネージ運用を想定した追加機能で、当初の機能仕様の範囲外。
+`power_schedule_enabled` が既定の `false` である限り、他の3キーの値に関わらず
+現行どおり `power_saving_enabled` / `power_saving_timeout` による無操作消灯のみが
+働く。詳細は8章を参照。
+
 ---
 
 ## 8. 省電力・人感センサー制御
@@ -543,6 +553,45 @@ photo-frame では `transition` と `max_slides_in_memory` がどこからも参
 
     SDL の再生成は 0.4〜2.0 秒と変動が大きく、パネル応答と並行して進む。
     実際に見えるのは遅い方であり、実測ではパネル応答が支配的だった。
+
+*   **時間帯による省電力モードの切り替え**: デジタルサイネージとしての運用
+    （営業時間内は常時点灯したい等）を想定した追加機能。当初の機能仕様の範囲外で、
+    ユーザーの要望から追加した。無効（既定）のときは上記の無操作消灯のみが働く。
+
+    `power_schedule_enabled` を有効にすると、`power_schedule_start` 〜
+    `power_schedule_end`（いずれも0時からの分。0〜1410、30分刻み。上限が1439ではなく
+    1410なのは、基本設定画面の Slider が `max_value=1410`＝23:30 までしか作れないため。
+    `src/power_schedule.py` の `MAX_MINUTE` が範囲を持つ）の時間帯と、
+    `power_schedule_off_hours` によって実効モードが決まる（`src/power_schedule.py`
+    が判定し、`main.py` の `_update_power_saving()` が毎ループ反映する）。
+
+    | 実効モード | 条件 | 挙動 |
+    |---|---|---|
+    | 常時点灯 | 有効かつ時間帯内 | 消灯していたら点灯する。無操作タイマーでは消灯しない。人感センサー・タッチは従来どおり活動として扱う |
+    | 通常 | 無効、または時間帯外で `power_schedule_off_hours=normal` | 現行の無操作消灯（`power_saving_enabled` / `power_saving_timeout`）のみが働く |
+    | 強制消灯 | 時間帯外で `power_schedule_off_hours=force_off` | 点灯中なら（境界に達した瞬間に）消灯する。ただし基本設定画面でユーザー自身が `power_schedule_off_hours` を強制消灯へ切り替えた「その操作」による遷移では消灯しない（その操作のタップ入力で消灯直後に再点灯する往復を避けるため。見分け方は後述）。人感センサーの検知は消費するが復帰には使わない。タッチでは一時的に点灯し、`power_saving_timeout` 経過後（`power_saving_enabled` の値に関わらず）再び消灯する |
+
+    `power_schedule_start == power_schedule_end` は「時間帯なし（常に時間帯外）」を
+    意味する。`start < end` は同日内の時間帯（例 `09:00〜18:00`）、`start > end` は
+    日跨ぎの時間帯（例 `22:00〜06:00`）として扱う。
+
+    時刻は分（int）で持つ。基本設定画面の Slider にそのまま渡せる数値にするためで、
+    `"09:30"` のような文字列だと min/max/step で扱えない。画面上の表示は
+    `time_format` 設定に従って `09:30` のように整形する（`src/i18n.py` の
+    `format_minutes()`）。
+
+    設定値そのものの反映は `main.py` の `_on_setting_changed()` への配線を要しない
+    （`power_saving_timeout` と同じく、`_update_power_saving()` が毎ループ
+    `config.get()` で読むため）。**ただし上表の「強制消灯」の除外条件のためだけに
+    配線が要る。** `_on_setting_changed()` が `power_schedule_*` 4キーのいずれかを
+    受けたら一回限りの印（`App._schedule_changed_by_user`）を立て、
+    `_update_power_saving()` が同じループ反復でそれを読んでから下ろす。
+    最初はこの印の代わりに `TouchWatcher.consume_input()`（タッチ入力）で見分けよう
+    としたが、Dev Container には入力デバイスが無く常に偽になり、実機でも
+    `TouchWatcher` は別スレッドで動くため同じ反復で読める保証が無く、
+    どちらの環境でも意図どおりに動かなかった。印を `_on_setting_changed()`
+    （`SettingsScreen.handle_input()` の TAP_UP から同期的に呼ばれる）で
+    直接立てる方式に置き換え、この問題を解消した。
 
 ---
 

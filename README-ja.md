@@ -162,6 +162,10 @@ SSH 越しに実行する場合は `setsid nohup` で切り離し、ログをポ
 | `power_saving_timeout` | `300` | 消灯までの無操作時間（秒） |
 | `display_wakeup_delay` | `3.0` | 復帰後に操作を受け付けるまでの待ち時間（秒） |
 | `motion_sensor_enabled` | `true` | 人感センサーの有効・無効 |
+| `power_schedule_enabled` | `false` | 時間帯を指定して常時点灯にする（サイネージ運用向け） |
+| `power_schedule_start` | `540` | 常時点灯の開始（0時からの分。`540` = 09:00） |
+| `power_schedule_end` | `1080` | 常時点灯の終了（0時からの分。`1080` = 18:00） |
+| `power_schedule_off_hours` | `normal` | 時間帯外の動作（`normal` / `force_off`） |
 | `photo_cache_max_mb` | `512` | 画像キャッシュの上限（`0` で無制限） |
 | `cache_lifetime_hours` | `24` | 写真リストのキャッシュ有効期間（時間） |
 | `daily_pickup_count` | `3` | デイリーピックアップで1日に選ぶアルバム数 |

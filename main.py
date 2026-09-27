@@ -13,7 +13,7 @@ import signal
 import sys
 import threading
 import time
-from datetime import date
+from datetime import date, datetime
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,6 +49,7 @@ from src.immich_api import ImmichAPI  # noqa: E402
 from src.motion_sensor import MotionSensor  # noqa: E402
 from src.photo_cache import PhotoCache  # noqa: E402
 from src.photo_source import PhotoSource  # noqa: E402
+from src import power_schedule  # noqa: E402
 from src.touch_watcher import TouchWatcher  # noqa: E402
 
 # 写真リストを取得できなかったときの再試行間隔
@@ -171,6 +172,14 @@ class App:
         # 復帰待ちなどで入力を捨てたことを覚えておく印。
         # 真の間は次の TAP_DOWN まで受け付けない（下の _handle_events を参照）
         self._awaiting_down = False
+        # 時間帯による省電力モードの前回値。既定は無効時の実効モードと同じ normal にして
+        # おき、power_schedule_enabled が false のままなら起動直後に切り替わりログが
+        # 出ないようにする（`_update_power_saving` 参照）
+        self._power_mode = power_schedule.MODE_NORMAL
+        # 基本設定画面で power_schedule_* を変更した直後の1回だけ立つ印。
+        # `_on_setting_changed()` が立て、`_update_power_saving()` が同じループ
+        # 反復の中で読んで下ろす（詳細はその2箇所のコメントを参照）
+        self._schedule_changed_by_user = False
 
         self._frames = 0
         self._frames_since_log = 0
@@ -271,8 +280,23 @@ class App:
             # 呼ばなくても直るが、date_format と挙動を揃えるために同じく呼ぶ
             self._overlay.invalidate()
 
-        # power_saving_enabled / power_saving_timeout / show_countdown はメインループが
-        # 毎回 config を読みに行くため、ここでの配線は不要
+        elif key in ('power_schedule_enabled', 'power_schedule_start',
+                     'power_schedule_end', 'power_schedule_off_hours'):
+            # 値そのものは _update_power_saving() が毎ループ config.get() で読むため、
+            # 反映のためだけならここへの配線は要らない。それでも呼び出す理由は
+            # 「設定変更それ自体が force_off への遷移をまたいでいた場合に、
+            # その変更操作のタップで即消灯させない」ための一回限りの印を立てるため
+            # （詳細は _update_power_saving() のコメント参照）。
+            # SettingsScreen.handle_input() は TAP_UP で _process_changes() を呼び、
+            # そこから同期的にこのコールバックへ来る。run() のループは
+            # `_handle_events(now)` の直後に `_update_power_saving(now)` を呼ぶ順序
+            # なので、ここで立てた印は同じ反復の _update_power_saving() で必ず読める
+            # （次のループまで持ち越されることはない）。
+            self._schedule_changed_by_user = True
+            self._last_activity = time.monotonic()
+
+        # power_saving_enabled / power_saving_timeout / show_countdown は
+        # メインループが毎回 config を読みに行くため、ここでの配線は不要
         # （SettingsScreen 側で ConfigManager.set() 済みであれば次のループから効く）
 
     def _check_date_rollover(self, now: float) -> None:
@@ -470,11 +494,92 @@ class App:
             # 写真送りに使わせない（次の TAP_DOWN まで捨てる）
             self._awaiting_down = True
 
+    def _current_datetime(self) -> datetime:
+        """
+        `power_schedule.resolve_mode()` に渡すローカル時刻。
+
+        `time.monotonic()`（活動タイマーの計測に使う）とは別に、時間帯判定だけ
+        壁時計時刻が要るためメソッドとして切り出した。テストではここを差し替えれば
+        任意の時刻で `_update_power_saving()` を駆動できる。
+        """
+        return datetime.now()
+
     def _update_power_saving(self, now: float) -> None:
-        # 短絡評価にすると片方しか消費されないため、必ず両方を読む
+        """
+        省電力の状態遷移をまとめて扱う。
+
+        `power_schedule.resolve_mode()` で実効モード（always_on/normal/force_off）を
+        毎回求め、モードが変わった瞬間だけログを出す（毎フレームのログ禁止）。
+        センサー／タッチの消費は分岐より前で必ず両方行う
+        （短絡評価にすると片方しか消費されないため）。
+        """
         motion = self._sensor.consume_motion()
         touched = self._touch.consume_input()
 
+        mode = power_schedule.resolve_mode(self._config, self._current_datetime())
+
+        # 基本設定画面での power_schedule_* の変更を「ユーザー操作起点の遷移」として
+        # 見分けるための印。読んだら呼び出しごとに必ず1回だけ下ろす。モード分岐より
+        # 前（早期 return の手前）でここを済ませることで、遷移が起きなかった回
+        # （例: force_off のまま別のキーだけ変えた）でも印を持ち越さず、
+        # 次に本当に時刻境界で遷移したときに誤って即消灯を見送らないようにする。
+        # `_on_setting_changed()` は SettingsScreen.handle_input() の TAP_UP から
+        # 同期的に呼ばれ、run() は同じループ反復で `_handle_events(now)` の直後に
+        # `_update_power_saving(now)` を呼ぶため、印は必ずこの呼び出しで読める
+        # （次のループへ持ち越されることはない）。
+        schedule_changed = self._schedule_changed_by_user
+        self._schedule_changed_by_user = False
+
+        if mode != self._power_mode:
+            logger.info('省電力モードが切り替わりました: %s -> %s', self._power_mode, mode)
+            if self._power_mode == power_schedule.MODE_ALWAYS_ON and mode == power_schedule.MODE_NORMAL:
+                # always_on から抜けた瞬間に即座に無操作タイマーが満了したことに
+                # ならないよう、境界からタイマーを数え直す
+                self._last_activity = now
+            if mode == power_schedule.MODE_FORCE_OFF and self._display.is_on and not schedule_changed:
+                # ユーザーが基本設定画面から force_off へ切り替えた「その操作」による
+                # 遷移では即消灯しない。`not touched` で見分けようとした前バージョンは
+                # 不十分だった: Dev Container では TouchWatcher に入力デバイスが無く
+                # touched は常に False（それでも即消灯していた）、実機でも
+                # TouchWatcher は別スレッドのため、この呼び出しと同じループ反復で
+                # 指を離した入力が読めている保証が無く競合しうる。
+                # `_on_setting_changed()` が同期的に立てるこの印なら、TouchWatcher の
+                # 有無やスレッドのタイミングに依存せず、開発環境と実機で同じ挙動になる。
+                # 印が立っていない（=時刻の経過だけで境界を跨いだ）場合は従来どおり
+                # 即消灯する
+                logger.info('スケジュールにより消灯します')
+                self._display.turn_off()
+            self._power_mode = mode
+
+        if mode == power_schedule.MODE_ALWAYS_ON:
+            # 時間帯内は無操作タイマーで消灯しない。センサー／タッチは
+            # 従来どおり活動として記録しておく（normal へ戻ったときの基準になる）
+            if motion or touched:
+                self._last_activity = now
+            if not self._display.is_on:
+                logger.info('スケジュールにより点灯します')
+                self._display.turn_on()
+                self._awaiting_down = True
+            return
+
+        if mode == power_schedule.MODE_FORCE_OFF:
+            # 人感センサーの検知は消費するだけで捨てる（復帰にも活動にも使わない）。
+            # タッチだけが一時的な点灯を許す
+            if touched:
+                self._last_activity = now
+                if not self._display.is_on:
+                    logger.info('タッチにより復帰します')
+                    self._display.turn_on()
+                    self._awaiting_down = True
+                    return
+
+            timeout = float(self._config.get('power_saving_timeout', 300))
+            if self._display.is_on and now - self._last_activity >= timeout:
+                logger.info('無操作が %.0f 秒続いたため消灯します', timeout)
+                self._display.turn_off()
+            return
+
+        # mode == normal: 現行の挙動そのまま（power_schedule が無効な場合を含む）
         if motion or touched:
             self._last_activity = now
             if not self._display.is_on:
