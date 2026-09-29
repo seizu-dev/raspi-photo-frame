@@ -107,9 +107,13 @@ SSH でアクセスできる。Docker + リモート管理 UI のエージェン
 
 ### ホスト側の前提設定
 
-1. `config.txt` で Full KMS を有効にする
-2. zram swap を有効にする（RAM 512MB の保険）
+1. `config.txt` に `dtoverlay=vc4-kms-v3d`（Full KMS）があることを確認する
+   （現行の Raspberry Pi OS では既定で有効。描画も消灯もこれが前提）
+2. 映らない場合は `cmdline.txt` にモード指定を足す。開発に使った変換アダプタでは
+   `video=HDMI-A-1:1024x600MR@50e` が必須（`.claude/architecture.md` の確定事項3）
 3. **フレームバッファコンソールを切り離す**（`tools/host-setup/`）
+
+zram swap は OS の既定（`rpi-swap` パッケージ）で有効になっているので、手順には含めない。
 
 消灯・復帰のたびにコンソールの文字が一瞬見えるのを防ぐ。導入は次の3コマンド。
 

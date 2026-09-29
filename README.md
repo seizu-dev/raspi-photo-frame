@@ -42,7 +42,10 @@ pipeline were both worked backwards from that limit.
 (which connects over DSI) cannot be used, so this project assumes mini HDMI plus a
 USB touch panel.
 
-## Required settings (without these, nothing appears on screen)
+## If nothing appears on screen
+
+Two settings are behind a blank screen. The first is always required and is already
+in place; the second depends on your hardware.
 
 ### 1. `SDL_RENDER_DRIVER=opengles2`
 
@@ -56,17 +59,19 @@ environment variables during debugging.
 
 ### 2. A mode line in `cmdline.txt`
 
-`/boot/firmware/cmdline.txt` needs this entry:
+Depending on your mini HDMI adapter and panel, `/boot/firmware/cmdline.txt` may need
+a mode line. The hardware this was developed against needed this one:
 
 ```
 video=HDMI-A-1:1024x600MR@50e
 ```
 
-On the hardware this was developed against, the mini HDMI adapter could not carry a
-pixel clock at or above 40 MHz, so the standard 1024x600@60 (51.5 MHz) produced no
-picture at all. With the line above it runs at 1024x600 @ 49.61 Hz / 36.36 MHz.
+There, the mini HDMI adapter could not carry a pixel clock at or above 40 MHz, so the
+standard 1024x600@60 (51.5 MHz) produced no picture at all. With the line above it
+runs at 1024x600 @ 49.61 Hz / 36.36 MHz.
 
-The value you need depends on your adapter and panel. Section 9-9 of
+If your display works without it, you don't need it. If it doesn't, the value you
+need depends on your adapter and panel. Section 9-9 of
 [SPECIFICATION.md](SPECIFICATION.md) walks through how this was isolated.
 
 ## Setup
