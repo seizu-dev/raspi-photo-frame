@@ -14,6 +14,7 @@ Immich から写真を取得してスライドショー表示し、タッチで�
 ## 主な機能
 
 - Immich のアルバム / お気に入り / デイリーピックアップから写真を取得します
+  （Google Drive の共有フォルダも取得元にできます。下記の番外編を参照）
 - 4種類の遷移効果（クロスフェード / 黒フェード / スライド / ワイプ）とランダム選択に対応します
 - 写真の収め方を3方式（内接 / 外接 / 縦横の向きが一致するときだけ外接）から選べます
 - 時計・撮影日・写真カウンタ・次の送りまでのカウントダウンゲージを重ねて表示します
@@ -31,7 +32,7 @@ Immich から写真を取得してスライドショー表示し、タッチで�
 | ディスプレイ | mini HDMI 接続ディスプレイ + USB タッチパネル（1024x600） |
 | センサー | AM312 PIR 人感センサー（GPIO 18、任意） |
 | その他 | microSD 16GB 以上、電源アダプタ |
-| サーバー | セルフホストの Immich |
+| サーバー | セルフホストの Immich（または Google Drive の共有フォルダ。番外編を参照） |
 
 **Zero 2 W に DSI コネクタは存在しません。** Raspberry Pi 公式のタッチディスプレイ
 （DSI 接続）は使えないため、mini HDMI + USB タッチパネルを前提としています。
@@ -63,6 +64,11 @@ video=HDMI-A-1:1024x600MR@50e
 [SPECIFICATION.md](SPECIFICATION.md) の 9-9 を参照してください。
 
 ## セットアップ
+
+この節は既定の経路（Immich を写真取得元にする場合）を扱います。Google Drive の
+共有フォルダを使いたい場合は、まずこの節を最後まで終えてから、下記の
+[番外編](#番外-google-drive-を写真の取得元にする)を参照してください。変更点は
+環境変数がいくつか増えるだけです。
 
 ### ホスト側の準備
 
@@ -96,46 +102,6 @@ Immich の API キーには次の3つの権限があれば足ります（Immich 
 `asset.download` などそれ以外の権限は使いません。権限が足りないと Immich は `403` と
 `Missing required permission: <権限名>` を返します（`tools/verification/immich_probe.py` で切り分けられます）。
 
-#### Immich の代わりに Google Drive を使う
-
-`.env` で `PF_PHOTO_PROVIDER=gdrive` を設定すると、Immich の代わりに Google Drive の
-共有フォルダから写真を読み込みます。個人の Google アカウントではなく
-サービスアカウント（SA）で認証します。
-
-1. Google Cloud のコンソールでプロジェクトを用意し、**Google Drive API** を有効化します。
-2. **サービスアカウント**を作成し、JSON 鍵をダウンロードします。
-3. 鍵ファイルをコンテナから読める場所に置き、`GDRIVE_SA_KEY_FILE` でそのパスを指定します
-   （既定値は config ディレクトリ直下の `gdrive-service-account.json`。つまり
-   `settings.json` と同じ bind mount 先）。パーミッションは絞り（`chmod 600`）、
-   uid 1000 から読めることを確認してください。**このファイルはコミットしないでください**
-   （`.gitignore` は `/config/*.json` をサンプル以外すべて除外済みです）。
-4. 表示したいフォルダを、サービスアカウントのメールアドレス（JSON 鍵の
-   `client_email`）へ「閲覧者」権限で共有します。
-5. そのフォルダの ID（Drive の URL の末尾）を `GDRIVE_ROOT_FOLDER_ID` に設定します。
-
-フォルダ構成の規則:
-
-*   ルート直下の各サブフォルダを1つのアルバムとして扱います。
-*   ルート直下に直接置かれた写真は、「未分類」という1つの仮想アルバムにまとめられます。
-*   フォルダの直下だけを見ます。孫フォルダやショートカットは対象外です。
-
-対応形式は JPEG / PNG / WebP / HEIC / HEIF です。まず Drive 側のサーバー処理による
-サムネイル（EXIF/HEIF の回転も適用され、HEIC は JPEG/PNG へ変換されます）を使い、
-それが使えない場合に限って JPEG/PNG/WebP の原本をダウンロードします。**HEIC/HEIF の
-原本はこの端末上ではデコードしません**（フル解像度の HEIC を原本からデコードすると
-この端末のメモリを大きく超えるピーク値になりえます。実測で 48MP の HEIC が約600MB）。
-そのため、Drive のサムネイル生成が対応できない HEIC/HEIF ファイルは表示されません。
-ここで使っている `=w幅-h高さ` 形式のサムネイルサイズ指定は Drive の公式リファレンスに
-明記された仕様ではなく観測に基づくものなので、将来変わる可能性があります。
-
-Google Drive には「お気に入り」に相当する概念が無いため、この取得元では
-アルバム選択とデイリーピックアップのみが使えます。
-
-表紙はフォルダ内の写真を名前順に並べた先頭の画像です。Immich では表紙を
-差し替えると識別子自体が変わってキャッシュも自然に作り直されますが、Drive の
-表紙はフォルダに対して固定のキーで表されるため、基本設定画面の
-「写真リストの有効期間」（`cache_lifetime_hours`）を過ぎるごとに取り直されます。
-
 `.env` の `GID_*` はデバイスのグループ ID で、**ホストごとに異なります。**
 必ず実機で確認してから設定してください。
 
@@ -166,6 +132,58 @@ docker compose up -d
 
 **Zero 2 W ではビルドに 10 分以上かかります。** その間 CPU が飽和するため、
 SSH 越しに実行する場合は `setsid nohup` で切り離し、ログをポーリングして回収してください。
+
+#### リポジトリを clone せず、イメージだけで動かす
+
+リポジトリを clone したくない場合は、次の内容を `docker-compose.yml` として保存し、
+公開イメージで起動できます。これはリポジトリの `docker-compose.yml` の要約で、
+手作業で内容を合わせています。**食い違いがあれば、リポジトリのファイルを正としてください。**
+
+```yaml
+services:
+  app:
+    image: ghcr.io/seizu-dev/raspi-photo-frame:latest
+    restart: unless-stopped   # 起動時に自動起動する。systemd ユニットは無い
+    init: true                # ゾンビプロセスを回収し、SIGTERM がアプリへ確実に届くようにする
+
+    user: "1000:1000"         # 非rootで動く。--privileged は不要
+    group_add:                # GID はホスト固有。getent group video render input gpio で確認する
+      - "${GID_VIDEO:-44}"    # video  -> /dev/dri/card0（描画）
+      - "${GID_RENDER:-992}"  # render -> /dev/dri/renderD128（描画）
+      - "${GID_INPUT:-996}"   # input  -> /dev/input/*（タッチ）
+      - "${GID_GPIO:-986}"    # gpio   -> /dev/gpiochip0（人感センサー）
+
+    devices:
+      - /dev/dri:/dev/dri              # KMSDRM 描画
+      - /dev/input:/dev/input          # USB タッチ入力
+      - /dev/gpiochip0:/dev/gpiochip0  # 人感センサー用。無ければこの行を外してよい
+
+    volumes:
+      - /run/udev:/run/udev:ro         # 無いと SDL2 が入力デバイスを列挙できない
+      - ./config:/config               # settings.json の置き場所（bind mount。イメージには焼かない）
+      - photo-cache:/cache             # named volume。再作成のたびに再ダウンロードしないため
+      - /etc/localtime:/etc/localtime:ro  # tzdata を別途入れずにローカル時刻にする
+
+    environment:
+      SDL_VIDEODRIVER: kmsdrm
+      SDL_RENDER_DRIVER: opengles2     # 必須。既定の opengl では描画命令が黙って無視される
+      PF_CONFIG_DIR: /config
+      PF_CACHE_DIR: /cache
+
+    env_file:
+      - .env                           # IMMICH_BASE_URL / IMMICH_API_KEY 等（.env.sample 参照）
+
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }   # SD カードでログが無制限に増えないようにする
+
+volumes:
+  photo-cache:
+```
+
+このファイルと同じ場所に `.env`（`.env.sample` から作成）と `config/settings.json`
+（`config/settings.sample.json` から作成）も必要です。この2つはリポジトリから
+取得するか、上記「資格情報と設定」の内容に沿って自分で用意してください。
 
 ## 操作
 
@@ -286,6 +304,52 @@ GPU・RAM がすべて異なるため、階層1で動いたことを根拠に実
   DRM master は1プロセスしか持てないため、消灯時は SDL を破棄して master を解放します
 - **消灯中は SDL が無いため pygame のイベントを取得できません。** タッチによる復帰は
   `/dev/input` の直読みで行っています
+
+## 番外: Google Drive を写真の取得元にする
+
+Immich の代わりに、Google Drive の共有フォルダから写真を表示することもできます。
+個人の Google アカウントではなくサービスアカウント（SA）で認証し、ルートフォルダ
+直下のサブフォルダをアルバムとして読み込みます。
+
+### 設定手順
+
+1. Google Cloud のコンソールでプロジェクトを用意し、**Google Drive API** を有効化します。
+2. **サービスアカウント**を作成し、JSON 鍵をダウンロードします。
+3. 鍵ファイルをコンテナから読める場所に置きます（例えば `config/` 直下。
+   `settings.json` と同じ bind mount 先です）。パーミッションは絞り（`chmod 600`）、
+   uid 1000 から読めることを確認してください。**このファイルはコミットしないでください**
+   （`.gitignore` は `config/` 内の JSON ファイルをサンプル以外すべて除外済みです）。
+4. 表示したいフォルダを、サービスアカウントのメールアドレス（JSON 鍵の
+   `client_email`）へ「閲覧者」権限で共有します。
+5. そのフォルダの ID（Drive の URL の末尾）を控えます。
+
+上記の docker-compose の例は既に `./config:/config` を bind mount しているので、
+ボリューム設定を変えなくても鍵ファイルをコンテナから読めます。
+
+### `.env`
+
+```bash
+PF_PHOTO_PROVIDER=gdrive
+GDRIVE_ROOT_FOLDER_ID=<手順5で控えたフォルダ ID>
+# 鍵が既定のパス（config/gdrive-service-account.json）に無い場合のみ:
+# GDRIVE_SA_KEY_FILE=/config/gdrive-service-account.json
+```
+
+### フォルダ構成の規則
+
+- ルート直下の各サブフォルダを1つのアルバムとして扱います。
+- ルート直下に直接置かれた写真は、「未分類」という1つの仮想アルバムにまとめられます。
+- フォルダの直下だけを見ます。孫フォルダやショートカットは対象外です。
+
+### 制約
+
+- 対応形式は JPEG / PNG / WebP / HEIC / HEIF です。
+- Google Drive には「お気に入り」に相当する取得元はありません。アルバム選択と
+  デイリーピックアップのみが使えます。
+- 表紙はフォルダ内の写真を名前順に並べた先頭の画像です。
+
+HEIC/HEIF の扱い（とその理由）の詳細は [SPECIFICATION.md](SPECIFICATION.md) の
+9-11 節を参照してください。
 
 ## ライセンス
 
