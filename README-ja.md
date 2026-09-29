@@ -276,7 +276,16 @@ Immich の代わりに、Google Drive の共有フォルダから写真を表示
    （`.gitignore` は `config/` 内の JSON ファイルをサンプル以外すべて除外済みです）。
 4. 表示したいフォルダを、サービスアカウントのメールアドレス（JSON 鍵の
    `client_email`）へ「閲覧者」権限で共有します。
-5. そのフォルダの ID（Drive の URL の末尾）を控えます。
+5. そのフォルダの ID を控えます。ブラウザの Google Drive でフォルダを開いたとき、
+   アドレスバーの `/folders/` より後ろの部分が ID です。
+
+   ```
+   https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz_EXAMPLE?usp=sharing
+                                          └────────── フォルダ ID ──────────┘
+   ```
+
+   `?usp=sharing` のように後ろに続く部分は含めません。「共有」→「リンクをコピー」で
+   得られるリンクにも、同じ ID が入っています。
 
 リポジトリの `docker-compose.yml` は既に `./config:/config` を bind mount しているので、
 鍵ファイルを `config/` 直下に置けば、volumes の設定を変えなくてもコンテナから読めます。

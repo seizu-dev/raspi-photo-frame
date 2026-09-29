@@ -298,7 +298,16 @@ subfolders of a root folder as albums.
    sample settings file.
 4. Share the folder you want to display with the service account's email address
    (found in the JSON key as `client_email`), with **Viewer** access.
-5. Note that folder's ID (the last path segment of its Drive URL).
+5. Note that folder's ID. Open the folder in Google Drive in a browser; the ID is the
+   part of the address bar after `/folders/`:
+
+   ```
+   https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz_EXAMPLE?usp=sharing
+                                          └─────────── folder ID ───────────┘
+   ```
+
+   Leave out anything after it, such as `?usp=sharing`. The same ID also appears in
+   the link you get from "Share" → "Copy link".
 
 This repository's `docker-compose.yml` already bind-mounts `./config:/config`, so
 placing the key file under `config/` lets the container read it without any change
