@@ -89,6 +89,14 @@ Docker 基盤 約75MB と他コンテナを引いた残りがアプリの取り�
 -   **画像キャッシュを永続ボリュームに置かずコンテナ内に置かない。** 再作成のたびに
     再ダウンロードすると 2.4GHz Wi-Fi の帯域を浪費する。
 -   **秘匿情報（`config.py` / `settings.json`）をイメージに焼き込まない。** ボリュームで渡す。
+-   **Google Drive の HEIC/HEIF の原本をデコードしない。** サーバー側の縮小
+    （`thumbnailLink`）が使えない場合はスキップし、JPEG/PNG/WebP に限って
+    原本へフォールバックする。
+-   **画素上限なしで原本をデコードしない。** `PhotoCache`（`originals=True`）は
+    `MAX_ORIGINAL_PIXELS` を超える画像をデコード前にスキップする。
+-   **EXIF 補正（`exif_transpose`）を Immich 経路に掛けない。** `delivers_originals`
+    が True の取得元（Drive）だけに適用する。
+-   **署名付き URL（Drive の `thumbnailLink` 等）とアクセストークンをログに出さない。**
 
 ## ディレクトリ構成
 
@@ -99,9 +107,12 @@ docker-compose.yml          デバイスパススルー・非root・ボリュー
 main.py                     アプリケーションループ / 画面遷移
 src/
   photo_provider.py         写真取得元（provider）の抽象化層（新規。Protocol / 工場関数 /
-                            起動時の設定整合。PR1: .claude/plans/abundant-weaving-kernighan.md）
+                            起動時の設定整合。PR1/PR2: .claude/plans/abundant-weaving-kernighan.md）
   immich_api.py             Immich API クライアント（photo-frame から移植・改修。
                             PhotoProvider Protocol を満たす）
+  gdrive_api.py             Google Drive の共有フォルダを写真取得元にする
+                            PhotoProvider 実装（新規。PR2）。サーバー側の縮小
+                            （thumbnailLink）を優先し、原本は例外経路として扱う
   photo_cache.py            表示解像度確定済み画像のディスクキャッシュ（再設計。
                             取得元ごとに namespace でサブディレクトリを分ける）
   photo_source.py           provider とキャッシュを繋ぐ層（新規。フォールバックと表示順。
@@ -127,6 +138,16 @@ src/
 
 -   `settings.json` / `settings.sample.json` のキー ↔ `config_manager.py` のデフォルト値
     ↔ 基本設定画面のウィジェット（**3点セット**。1つでも欠けると設定が反映されない）
+-   `PhotoProvider.album_thumbnail_expires` ↔ `gui/screens/album.py` の
+    `_request_stale_refresh()` ↔ 設定キー `cache_lifetime_hours` ↔ `PhotoCache` の
+    サムネイルが `_touch()` されない前提（mtime = 最後に `store_thumbnail()` した時刻）。
+    Immich は表紙を差し替えると `albumThumbnailAssetId` 自体が変わり
+    `PhotoCache` のキャッシュキーが変わって自然に作り直されるため `False`。
+    Drive はフォルダの表紙を固定キー（`albumThumbnailAssetId='cover'`）で表すため
+    キーが変わらず、`True` にして `album.py` 側が `cache_lifetime_hours` 超過を
+    `is_thumbnail_stale()` で判定し取り直しを依頼する。**`get_photo_path()` と違い
+    `get_thumbnail_path()` は `_touch()` を呼ばない**契約を崩すと、閲覧するだけで
+    mtime が更新され続け「古いのに古いと判定されない」状態になる
 -   `settings.json` の `motion_sensor_enabled` ↔ `config_manager.py` の既定値 ↔
     基本設定画面のウィジェット ↔ **`main.py` の `_apply_motion_sensor_setting()`**。
     設定キーと画面だけ足して `main.py` の配線を忘れると、**トグルは動くのに GPIO が
@@ -350,12 +371,27 @@ src/
     `_AlbumCell.invalidate_wrapped()`（折り返し文字列側のキャッシュ破棄。
     テクスチャ側だけを破棄する `release_labels()` とは別物）の両方を行う。
     **SDL の世代の変化だけならテクスチャの破棄で足りるが、言語の変化はそれに加えて
-    この2つが要る**（アルバム一覧の再取得は言語が変わっても絶対に行わない）
--   写真取得元の抽象化（PR1。`.claude/plans/abundant-weaving-kernighan.md`）で
-    生まれた組。取得元を追加するとき（PR2 の Google Drive 等）は以下をすべて確認する。
+    この2つが要る**（アルバム一覧の再取得は言語が変わっても絶対に行わない）。
+    **`gdrive_api.py` の `fetch_albums()` が返す「未分類」仮想アルバム
+    （ルート直下に画像が直接あるときだけ先頭へ差し込む）も同じ `name_key`
+    契約に乗る**（キー `album.gdrive_root`）。既存の `_VIRTUAL_ENTRIES`
+    （`favorites`/`daily_pickup`。固定リスト）とは別物で、`is_virtual` は
+    **付けない**（`is_virtual` は「サムネイルを要求しない」という別の意味を持ち、
+    未分類アルバムはサムネイルを持つため）。`id` に実在のフォルダIDを使うため
+    `_confirm_selection()` の `else` 分岐（`source='album'`）へ自然に落ち、
+    `entry.get('albumName') or ''` により `album_name=''` が保存される
+    （`albumName` を持たせず `name_key` だけ持たせてあるため）。この経路は
+    album.py に変更を加えずに動く
+-   Google Drive のサービスアカウント鍵ファイル ↔ `.gitignore` の
+    `/config/*.json`（`!/config/settings.sample.json` で例外）↔
+    `gdrive_api.py` の `DEFAULT_SA_KEY_FILENAME`（`gdrive-service-account.json`）。
+    ファイル名を変えるときは3箇所を揃える
+-   写真取得元の抽象化（PR1/PR2。`.claude/plans/abundant-weaving-kernighan.md`）で
+    生まれた組。取得元をさらに追加するとき（将来のローカルフォルダ対応等）は
+    以下をすべて確認する。
     -   `PF_PHOTO_PROVIDER` 環境変数 ↔ `photo_provider.py` の `create_provider()` の
-        分岐 ↔ `.env.sample` のコメント ↔ README の資格情報節（PR2 で Drive の
-        セットアップを書き足すときに追記する）
+        分岐 ↔ `.env.sample` のコメント ↔ README の資格情報節（`GDRIVE_SA_KEY_FILE` /
+        `GDRIVE_ROOT_FOLDER_ID` を含む）
     -   `PhotoProvider.cache_namespace` ↔ `PhotoCache.__init__` の `namespace` 引数
         （`photos/<ns>/` 等へのサブディレクトリ分け）↔ `enforce_limit()` /
         `get_total_size()` が見るルート（`self._photos_root` = 常に
@@ -370,9 +406,30 @@ src/
         お気に入りが無い取得元では仮想エントリの並びが1つ繰り上がるため）↔
         `photo_provider.reconcile_settings()`（`source == 'favorites'` なのに
         非対応の取得元へ切り替わったときに `daily_pickup` へ寄せる保険）
-    -   `PhotoProvider.delivers_originals` ↔ `PhotoCache` 側の原本向け処理
-        （EXIF 補正・画素上限。PR1 では常に False で未実装。PR2 で Drive の
-        原本経路を追加するときに配線する）
+    -   `PhotoProvider.delivers_originals` ↔ `PhotoCache.__init__` の `originals`
+        引数 ↔ `_encode_jpeg()` 内の EXIF 補正・画素上限（`MAX_ORIGINAL_PIXELS`）。
+        **True の取得元（Drive）にしか掛けない。Immich 経路（False）には
+        `exif_transpose` を一切掛けない**（Immich の preview は既に正しい向きで
+        返るため、二重回転の恐れがある）。`main.py` / `warm_cache.py` は
+        `provider.delivers_originals` を `PhotoCache(..., originals=...)` へ
+        そのまま渡す配線を持つ
+    -   Drive の `thumbnailLink` の要求寸法（`=wW-hH`）↔ `PhotoCache.display_size`
+        （`gdrive_api.py` の `set_display_size()` で伝える。provider は
+        `PhotoCache` より前に生成されるため、実際の表示解像度が分かるのは
+        `main.py`/`warm_cache.py` が `PhotoCache` を作った後になる）↔
+        `photo_cache.py` の `resolve_fit()`（Drive 側も同じ関数を再利用し、
+        別の判定式を複製しない）。**`imageMediaMetadata.width/height` は
+        回転前の値、`rotation` は 90° 単位の回数**（PoC 実測）なので、
+        `gdrive_api.py` はこの2つを組み合わせて「見た目の向き」を求めてから
+        `resolve_fit()` に渡す契約になっている
+    -   **HEIC/HEIF の原本はデコードしない。** `gdrive_api.py` の
+        `ORIGINAL_MIME_ALLOWED`（JPEG/PNG/WebP のみ）↔ `_skipped_originals`
+        （一度スキップしたら `files.get` すら呼ばず即座に諦める）。
+        48MP の HEIC を原本からデコードするとピーク約602MB（PoC 実測）になり、
+        実機の RAM 416MB では成り立たないため
+    -   **署名付き URL（thumbnailLink・原本のダウンロード URL）とアクセストークンを
+        ログに出さない。** `gdrive_api.py` の `_redact()`（ホスト名だけを残す）を
+        必ず経由する
     -   `PhotoCache.store_thumbnail()` の短辺 `THUMBNAIL_MAX_SHORT_SIDE`（250px）
         への縮小（拡大はしない）↔ `gui/screens/album.py` の `_AlbumCell` が
         描くサムネイル領域（232x232 の正方形セルへ中央クロップして表示するため、

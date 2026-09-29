@@ -309,6 +309,10 @@ class AlbumScreen:
         # 二重にリクエストを積まないための集合。範囲外に出たら discard し、
         # 再度可視範囲に入ったときに取り直せるようにする
         self._requested: set[int] = set()
+        # `provider.album_thumbnail_expires` が True の取得元向け。有効期限切れの表紙を
+        # 取り直し済み（または依頼済み）の index。**`_requested` と違い範囲外に出ても
+        # discard しない**（1訪問につき1回までに抑えるため。on_enter() でだけ空にする）。
+        self._refresh_requested: set[int] = set()
         # 前フレームでラベルのテクスチャを許可していた index の範囲 [start, end)。
         # **アルバム名のテクスチャを解放する対象を求めるために持つ。**
         # サムネイルと違い「要求した index の集合」が無い（描画時に遅延生成される）ため、
@@ -456,6 +460,7 @@ class AlbumScreen:
         self._selected_index = None
         self._textures.clear()
         self._requested.clear()
+        self._refresh_requested.clear()
         self._label_range = (0, 0)
         self._drain(self._list_queue)
         self._drain(self._thumb_request_queue)
@@ -494,6 +499,7 @@ class AlbumScreen:
         self._threads.clear()
         self._textures.clear()
         self._requested.clear()
+        self._refresh_requested.clear()
         self._label_range = (0, 0)
         for cell in self._cells:
             cell.texture = None
@@ -672,17 +678,23 @@ class AlbumScreen:
         （引数で固定し、動的に読み直さない）。**1件ごとの例外でスレッド自体を
         死なせない**（握らずに死ぬと、以降このスレッドへ積まれるリクエストが
         永久に処理されなくなる。ワーカーの全例外を握る方針）。
+
+        `force` は `provider.album_thumbnail_expires`（`_request_stale_refresh()`）
+        から積まれた取り直し依頼のときに True になる。True のときはディスク
+        キャッシュを見ずに必ず `fetch_album_thumbnail()` を呼び直す（キャッシュを
+        見てしまうと、有効期限切れと判定したまさにその古いファイルを再び
+        返してしまい取り直しにならないため）。
         """
         while not stop_event.is_set():
             try:
-                req_session, index, entry = self._thumb_request_queue.get(timeout=0.2)
+                req_session, index, entry, force = self._thumb_request_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
 
             try:
                 album_id = entry.get('id')
                 thumb_id = entry.get('albumThumbnailAssetId')
-                path = self._cache.get_thumbnail_path(album_id, thumb_id)
+                path = None if force else self._cache.get_thumbnail_path(album_id, thumb_id)
                 if path is None:
                     raw = self._provider.fetch_album_thumbnail(entry)
                     if raw is not None:
@@ -692,13 +704,20 @@ class AlbumScreen:
                 path = None
 
             if not stop_event.is_set():
-                self._thumb_result_queue.put((req_session, index, path))
+                self._thumb_result_queue.put((req_session, index, path, force))
 
     def _collect_thumbnails(self) -> None:
-        """ ワーカーの結果を取り込んでテクスチャ化する（メインスレッド限定） """
+        """
+        ワーカーの結果を取り込んでテクスチャ化する（メインスレッド限定）。
+
+        取り直し（`force=True`）が失敗した場合（`path is None`）は**何もせず
+        continue する**。`self._cells[index].texture` を書き換えないため、
+        今表示している古い表紙がそのまま残る（要件どおり「失敗したら古い表紙を
+        出し続ける」）。
+        """
         while True:
             try:
-                session, index, path = self._thumb_result_queue.get_nowait()
+                session, index, path, force = self._thumb_result_queue.get_nowait()
             except queue.Empty:
                 return
 
@@ -711,9 +730,16 @@ class AlbumScreen:
                 continue
             if index not in self._requested:
                 # 取得中に範囲外へ出て破棄済み。今さら足しても表示されないので捨てる
+                # （取り直し依頼も `_request_stale_refresh()` が「既にテクスチャを
+                # 持っている＝_requested に居る」ことを前提に積むため、この判定で
+                # force/非force のどちらも正しく扱える）。
                 continue
             if path is None:
-                logger.warning('アルバムサムネイルを取得できませんでした: index=%d', index)
+                if force:
+                    logger.warning('アルバムサムネイルの取り直しに失敗しました（既存の表紙を維持します）: index=%d',
+                                   index)
+                else:
+                    logger.warning('アルバムサムネイルを取得できませんでした: index=%d', index)
                 continue
 
             texture = self._r.texture_from_image(path)
@@ -752,6 +778,8 @@ class AlbumScreen:
         - 範囲外に出たセルのアルバム名テクスチャも `release_labels()` で手放す。
           **これが無いと一度でも描かれたセルの分が全て残り、アルバム数に比例して
           積み上がる**（600件で1,177本を実機で実測した）
+        - `provider.album_thumbnail_expires` が True の取得元では、可視範囲の
+          表紙のうち有効期限切れのものへ取り直しを依頼する（`_request_stale_refresh()`）
         """
         start, end = self._visible_index_range()
 
@@ -762,7 +790,10 @@ class AlbumScreen:
             if entry.get('is_virtual') or not entry.get('albumThumbnailAssetId'):
                 continue
             self._requested.add(index)
-            self._thumb_request_queue.put((self._session, index, entry))
+            self._thumb_request_queue.put((self._session, index, entry, False))
+
+        if self._provider.album_thumbnail_expires:
+            self._request_stale_refresh(start, end)
 
         for index in list(self._requested):
             if start <= index < end:
@@ -784,6 +815,41 @@ class AlbumScreen:
                 continue
             self._cells[index].release_labels()
         self._label_range = (label_start, label_end)
+
+    def _request_stale_refresh(self, start: int, end: int) -> None:
+        """
+        `provider.album_thumbnail_expires` が True の取得元向け。
+
+        Drive のようにフォルダの表紙が固定キー（`albumThumbnailAssetId='cover'`）で
+        表される取得元では、フォルダの先頭画像が入れ替わっても `PhotoCache` の
+        キャッシュキーが変わらないため、Immich（キーが変わって自然に作り直される）と
+        違って古い表紙がいつまでも表示され続ける。ここで `cache_lifetime_hours` を
+        過ぎたものだけ取り直しを依頼する。
+
+        - **今の表紙をまだ表示できていない index（`self._textures` に無い）は
+          対象にしない。** 初回取得は通常の経路（`_sync_visible_cells()` の
+          force=False 分岐）に任せる。ここで force=True の依頼を重ねて積むと、
+          まだ何も表示できていないのに2本のリクエストが競合する
+        - **`self._refresh_requested` に一度入れたら、可視範囲を出入りしても
+          discard しない。** 1訪問（on_enter〜on_leave）につき同じセルへ
+          何度も依頼しないための唯一の歯止め（`_requested` と違い範囲に応じて
+          動かさない）
+        - 今の表紙は消さない。取り直しの成否は `_collect_thumbnails()` 側が扱う
+          （成功したら差し替え、失敗したら何もしない＝古い表紙が残る）
+        """
+        max_age_hours = self._config.get('cache_lifetime_hours', 24)
+        for index in range(start, end):
+            if index in self._refresh_requested or index not in self._textures:
+                continue
+            entry = self._entries[index]
+            if entry.get('is_virtual') or not entry.get('albumThumbnailAssetId'):
+                continue
+            album_id = entry.get('id')
+            thumb_id = entry.get('albumThumbnailAssetId')
+            if not self._cache.is_thumbnail_stale(album_id, thumb_id, max_age_hours):
+                continue
+            self._refresh_requested.add(index)
+            self._thumb_request_queue.put((self._session, index, entry, True))
 
     # ------------------------------------------------------- SDL 再生成への追従
 

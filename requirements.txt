@@ -18,3 +18,11 @@ Pillow==10.4.0
 # lgpio には cp313 aarch64 wheel が無く builder ステージが必要になるため採用しなかった。
 # gpiod の wheel は libgpiod を static link しており、apt の追加パッケージは要らない。
 gpiod==2.5.0
+
+# Google Drive を写真取得元にする場合のみ使う（PF_PHOTO_PROVIDER=gdrive）。
+# トークン取得だけに使い、Drive REST 呼び出し自体は requests で直接行う
+# （google-api-python-client は使わない）。src/gdrive_api.py がこのモジュール自体を
+# 遅延 import するため、Immich のみを使う環境（実機の既定構成）の起動コスト・
+# 常駐メモリには影響しない。依存の pyasn1 / pyasn1-modules / cryptography は
+# aarch64 の cp313 wheel があることを確認済み（--only-binary=:all: のまま導入できる）。
+google-auth==2.58.1

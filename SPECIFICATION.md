@@ -124,19 +124,24 @@ Immich からの画像取得は帯域制約を前提とし、**原寸画像を�
 ### 3.3. 主要ライブラリ
 
 **写真取得元は `src/photo_provider.py` の `PhotoProvider` Protocol で抽象化している。**
-現時点で実装済みなのは Immich（`src/immich_api.py`）のみで、環境変数
-`PF_PHOTO_PROVIDER`（既定 `immich`）で選択する。Google Drive 等の追加取得元は
-今後の対応（`.claude/plans/abundant-weaving-kernighan.md`）とし、抽象化を先に入れても
-Immich 単体での挙動・キャッシュのファイルパスは一切変えない。
+実装済みは Immich（`src/immich_api.py`）と Google Drive（`src/gdrive_api.py`）の
+2つで、環境変数 `PF_PHOTO_PROVIDER`（既定 `immich`）で選択する
+（`.claude/plans/abundant-weaving-kernighan.md`）。Immich 単体での挙動・
+キャッシュのファイルパスは抽象化前と一切変わらない。
 
 *   `pygame-ce` — GUI / 描画
-*   `requests` — Immich API 通信
+*   `requests` — Immich API / Google Drive REST API 通信
 *   `Pillow` — 画像デコード・リサイズ（キャッシュ生成時）
 *   `gpiod` — 人感センサー（libgpiod v2 の公式バインディング）。
     `lgpio` は cp313 aarch64 の wheel が無く、Dockerfile に builder ステージが
     必要になるため採用しない。`gpiod` の wheel は libgpiod を static link しており、
     apt の追加パッケージも要らない。
 *   `evdev` — タッチ入力（SDL2 で取得できない場合のフォールバック）
+*   `google-auth` — Google Drive のサービスアカウントのトークン取得のみに使う
+    （`PF_PHOTO_PROVIDER=gdrive` のときだけ。`google-api-python-client` は使わず
+    REST 呼び出し自体は `requests` で直接行う）。`src/gdrive_api.py` はこのモジュール
+    自体を遅延 import するため、Immich のみを使う環境（実機の既定構成）の
+    常駐メモリ・起動コストには影響しない。
 
 ### 3.4. コンテナ実行構成
 
@@ -389,11 +394,32 @@ photo-frame の機能仕様を踏襲する。
 *   X サーバーを介さず、KMSDRM 経由で全画面描画される。
 *   起動後、即座にスライドショー画面へ遷移する。
 
-### 7.2. Immich 連携
+### 7.2. 写真取得元との連携
+
+写真取得元は `PF_PHOTO_PROVIDER` で選択する（`immich`（既定）/ `gdrive`）。
+
+**Immich 連携**
 
 *   **認証**: 事前に生成した API キーを設定ファイルまたは環境変数で与える。
 *   **写真ソース**: お気に入り / 指定アルバム / デイリーピックアップ から選択。
 *   **表示**: 写真に説明文がある場合、画面下部にテキスト表示する。日本語フォントの同梱が必要。
+
+**Google Drive 連携**
+
+*   **認証**: サービスアカウント（SA）の JSON 鍵を `GDRIVE_SA_KEY_FILE`
+    （既定は config ディレクトリ直下の `gdrive-service-account.json`）で与える。
+    共有フォルダを SA のメールアドレスへ「閲覧者」で共有しておく必要がある。
+*   **フォルダ構成**: `GDRIVE_ROOT_FOLDER_ID` で指定したフォルダの直下のサブフォルダを
+    アルバムとして扱う。ルート直下に写真が直接あれば「未分類」の仮想アルバムとして
+    まとめる。孫フォルダ・ショートカットは対象外（直下だけを見る）。
+*   **写真ソース**: 指定アルバム / デイリーピックアップのみ（**お気に入りには対応しない**。
+    `supports_favorites = False`）。
+*   **画像の取得**: サーバー側の縮小（`thumbnailLink`）を優先し、EXIF/HEIF の回転を
+    適用した状態で表示解像度へ近い画像を取得する。これが使えない場合に限り、
+    JPEG/PNG/WebP の原本へフォールバックする（**HEIC/HEIF の原本はデコードしない**。
+    Drive 側の変換に依存するため、変換できない場合は表示されない）。
+*   **撮影日時**: `imageMediaMetadata.time` が無い場合は表示しない（Immich と違い
+    ファイルの作成日時にはフォールバックしない）。
 
 ### 7.3. 画面構成
 
@@ -901,6 +927,28 @@ video=HDMI-A-1:1024x600MR@50e
 *   `video=HDMI-A-1:1024x600MR@40e`（28.9MHz / 39.5Hz）
     → バックライトは点灯するが映像は出ない。**垂直 39.5Hz がパネルの下限 50Hz を下回るため。**
     クロックを下げれば良いという判断は誤りで、垂直周波数の下限も同時に満たす必要がある。
+
+### 9-11. Google Drive を写真取得元にする（PoC / 階層1） — 【解決済み】
+
+`.claude/plans/abundant-weaving-kernighan.md` PR0（`tools/verification/gdrive_probe.py`、
+ブランチ `feat/gdrive-poc`）で実機・実 Drive フォルダに対して確認した。
+
+| 項目 | 結果 |
+|---|---|
+| サービスアカウント（SA）で共有フォルダを読めるか | **読める。** `google.oauth2.service_account.Credentials.from_service_account_file()` でトークンを取得し、Drive REST v3 を `requests` で直接呼ぶだけで一覧・原本取得まで通った |
+| fileId の文字集合 | `[A-Za-z0-9_-]` のみ（`.` を含まない）。`<fileId>.<md5先頭8文字>` をアセット ID に使える |
+| md5Checksum | 確認した全ファイルに存在 |
+| `imageMediaMetadata.width/height` | **EXIF/HEIF の回転を適用する前の値**（回転後ではない） |
+| `imageMediaMetadata.rotation` | 90° 単位の回転回数（0〜3。度数ではない） |
+| `imageMediaMetadata.time` | 書式は `YYYY:MM:DD HH:MM:SS`。無いことがある（その場合は撮影日を表示しない） |
+| HEIC の原本を Pillow でデコードした場合のピークメモリ | **48MP で約602MB、20MP で約211MB**（実機 RAM 416MB では成り立たない） |
+| `thumbnailLink` に `=wW-hH` を付けた場合 | Drive 側で **EXIF/HEIF の回転を適用したうえで、アスペクト比を保って W×H に収まる寸法**へ縮小して返す。HEIC も JPEG/PNG へ変換される。**認可ヘッダ無しでも取得できる署名付き URL**（有効期限は数時間） |
+| JPEG の原本を `draft('RGB',(1024,600))` した場合 | 縦長の写真では縮小されなかった（`draft()` は「要求サイズ以上になる最小の縮小率」を選ぶため、回転前の軸のまま要求すると取り違える） |
+| `exif_transpose()` の副作用 | 回転が無くても画像を複製し、ピークメモリが約20MB増える |
+
+これらの実測から、**サーバー側の縮小（`thumbnailLink`）を優先し、原本は
+JPEG/PNG/WebP に限った例外経路として扱う方針**（PR2）を採った。詳細な実装は
+7.2節・`.claude/architecture.md`「対で更新が必要な箇所」を参照。
 
 ---
 

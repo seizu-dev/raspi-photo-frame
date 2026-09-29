@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -51,6 +52,12 @@ ENFORCE_EVERY_N_STORES = 20
 # Drive 等（PR2）は縮小前のサムネイルを返しうるため、短辺がこれを超える場合だけ
 # 縮小する（拡大はしない・アスペクト比は維持する）。
 THUMBNAIL_MAX_SHORT_SIDE = 250
+
+# 原本を扱う取得元（`delivers_originals = True`。Google Drive の原本経路）の画素上限。
+# HEIC の原本を無条件にデコードすると 48MP で maxrss 約602MB（PoC 実測）になり、
+# RAM 416MB の実機では成り立たない。超過分はデコードせずスキップする
+# （`.claude/architecture.md`「画素上限なしで原本をデコードしない」）。
+MAX_ORIGINAL_PIXELS = 40_000_000
 
 # プロセス全体で1本のデコードロック。原本を扱う取得元（Google Drive 等。PR2 で追加）は
 # HEIC 等のデコード前サイズが大きい画像をそのまま開くことがあり、先読みスレッドと
@@ -143,18 +150,25 @@ class PhotoCache:
 
     def __init__(self, config_manager: 'ConfigManager', cache_dir: str | Path | None = None,
                  display_size: tuple[int, int] = DEFAULT_DISPLAY_SIZE,
-                 namespace: str = '') -> None:
+                 namespace: str = '', originals: bool = False) -> None:
         """
         `namespace` は取得元ごとにキャッシュのサブディレクトリを分けるための識別子
         （`PhotoProvider.cache_namespace`。.claude/architecture.md「対で更新が必要な
         箇所」参照）。**空文字（Immich）は従来どおり `photos/` 等の直下を使う**ため、
         既存キャッシュのパスは1つも変わらない。空文字以外を渡すと
         `photos/<namespace>/` のようにサブディレクトリへ分離される。
+
+        `originals` は取得元が `delivers_originals = True`（PhotoProvider Protocol）
+        かどうかを表す。True のときだけ `_encode_jpeg()` が原本向けの処理
+        （EXIF Orientation に応じた draft サイズの補正・`exif_transpose`・画素上限）を
+        行う。**Immich 経路（False）には一切掛けない**（Immich の preview は
+        既に正しい向きで返るため、二重回転の恐れがある）。
         """
         self.config = config_manager
         self.cache_dir = Path(cache_dir) if cache_dir else resolve_cache_dir()
         self.display_size = display_size
         self.namespace = namespace
+        self.originals = originals
 
         # 容量の上限（enforce_limit / get_total_size）は取得元をまたいで1つ。
         # namespace を持つインスタンスでも、このルートを rglob して全取得元ぶんを
@@ -291,6 +305,26 @@ class PhotoCache:
                 self._unlink(old, '古いサムネイル')
         return None
 
+    def is_thumbnail_stale(self, album_id: str, thumbnail_id: str, max_age_hours: float) -> bool:
+        """
+        サムネイルが `max_age_hours` より古いかを判定する（`album_thumbnail_expires`
+        が True の取得元向け。`.claude/architecture.md`「対で更新が必要な箇所」参照）。
+
+        判定は mtime（`os.replace()` による書き込み時刻）で行う。`get_thumbnail_path()`
+        は `_touch()`（LRU 用の mtime 更新）を呼ばない契約なので、mtime は
+        「最後に `store_thumbnail()` した時刻」のまま保たれる（`get_photo_path()` が
+        `_touch()` を呼ぶ写真本体とは異なる）。ファイルが存在しない場合は
+        「古い」とはみなさない（作り直しを急かす理由が無く、通常の初回取得の経路に任せる）。
+        """
+        if not album_id or not thumbnail_id or max_age_hours <= 0:
+            return False
+        path = self._thumbnail_path(album_id, thumbnail_id)
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return False
+        return time.time() - mtime > max_age_hours * 3600
+
     def store_thumbnail(self, album_id: str, thumbnail_id: str, raw: bytes | Path) -> Path | None:
         """
         アルバムサムネイルを保存する。
@@ -419,7 +453,7 @@ class PhotoCache:
         画像を JPEG バイト列へ変換する。max_size が指定されていれば表示解像度へ確定させる。
 
         `raw` は `bytes`（Immich 等、原本をメモリへ受け取る取得元）と `Path`
-        （原本をファイルへストリーミング保存する取得元。PR2 の Drive 原本経路向け）の
+        （原本をファイルへストリーミング保存する取得元。Drive 原本経路向け）の
         両方を受け付ける。Immich の preview は JPEG と WebP の両方が返るため、
         フォーマットを前提にしない。`fit` は max_size 指定時（写真本体）にのみ意味を持つ。
         サムネイル保存（max_size=None、store_thumbnail() 経由）では参照されず、
@@ -428,10 +462,33 @@ class PhotoCache:
         デコード〜エンコードの区間はプロセス全体で1本のロックに通す
         （_DECODE_LOCK のコメント参照。原本を扱う取得元の同時デコードによる
         ピークメモリを避けるため）。
+
+        `self.originals`（`delivers_originals = True` の取得元）のときだけ、
+        EXIF Orientation に応じた `exif_transpose` と画素上限チェックを行う
+        （**Immich 経路には一切掛けない**。Immich の preview は既に正しい向きで
+        返るため、二重回転の恐れがある）。
         """
         source = raw if isinstance(raw, Path) else BytesIO(raw)
         try:
             with _DECODE_LOCK, Image.open(source) as img:
+                orientation = None
+                if self.originals:
+                    # 画素上限（MAX_ORIGINAL_PIXELS）はデコード前に img.size だけで
+                    # 判定できる（Image.open() は遅延読み込みでヘッダしか読まない）。
+                    # HEIC の原本を無条件にデコードすると 48MP で maxrss 約602MB
+                    # （PoC 実測）になるため、超過分はデコードせずスキップする。
+                    px_w, px_h = img.size
+                    if px_w * px_h > MAX_ORIGINAL_PIXELS:
+                        logger.warning(
+                            '原本の画素数が上限を超えているためスキップします: %dx%d (上限 %dMP)',
+                            px_w, px_h, MAX_ORIGINAL_PIXELS // 1_000_000)
+                        return None
+                    try:
+                        orientation = img.getexif().get(0x0112)
+                    except (AttributeError, KeyError, TypeError, ValueError, OSError) as e:
+                        logger.debug('EXIF Orientation を読めませんでした: %s', e)
+                        orientation = None
+
                 if max_size and img.format == 'JPEG':
                     # draft() は JPEG のみ有効。1/2・1/4 スケールで直接デコードして
                     # デコード負荷とピークメモリを削る。他形式では何も起きない。
@@ -439,7 +496,36 @@ class PhotoCache:
                     # 高さ ≥ max_size 高さ）は draft() の「要求サイズ以上に
                     # デコードする」という保証でそのまま満たされるため、
                     # cover 用に別の縮小率へ変える必要はない。
-                    img.draft('RGB', max_size)
+                    #
+                    # `self.originals` のときは事情が違う: img.size は EXIF
+                    # Orientation を適用する前の（回転前の）軸のままなので、
+                    # 縦横比が90°効いている写真（Orientation 5-8）へそのまま
+                    # max_size を渡すと縦横を取り違えて要求してしまい、
+                    # 「縦長の写真が縮小されない」（PoC で確認した不具合）が起きる。
+                    # 見た目の向き（effective size）で fit を判定し、その目標寸法を
+                    # 回転前の軸へ戻してから draft() へ渡す。
+                    if self.originals and orientation in (5, 6, 7, 8):
+                        raw_w, raw_h = img.size
+                        eff_w, eff_h = raw_h, raw_w
+                        pre_fit = resolve_fit(fit, (eff_w, eff_h), max_size)
+                        if pre_fit == FIT_COVER:
+                            scale = max(max_size[0] / eff_w, max_size[1] / eff_h)
+                            eff_target = (max(1, math.ceil(eff_w * scale)),
+                                          max(1, math.ceil(eff_h * scale)))
+                        else:
+                            eff_target = max_size
+                        # 軸を回転前へ戻す（幅高さを入れ替える）
+                        img.draft('RGB', (eff_target[1], eff_target[0]))
+                    else:
+                        img.draft('RGB', max_size)
+
+                if self.originals and orientation in (2, 3, 4, 5, 6, 7, 8):
+                    # Orientation が無い（1 や None）ときは呼ばない。回転が無くても
+                    # 複製が発生しピークメモリが約20MB増えることを PoC で確認したため
+                    # （.claude/context/known-issues.md）。これで以降 img.size は
+                    # 見た目どおりの向きになり、直後の resolve_fit() 以降は
+                    # Immich 経路と全く同じロジックで扱える。
+                    img = ImageOps.exif_transpose(img)
 
                 if max_size:
                     resolved_fit = resolve_fit(fit, img.size, max_size)

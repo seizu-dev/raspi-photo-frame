@@ -12,6 +12,10 @@ venv/
 /settings.json
 /.env
 /config/settings.json
+# Google Drive のサービスアカウント鍵（gdrive-service-account.json 等）。
+# config/ 配下の JSON はサンプルを除きすべて秘匿情報として扱う。
+/config/*.json
+!/config/settings.sample.json
 
 # キャッシュ
 cache/

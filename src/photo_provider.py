@@ -1,14 +1,16 @@
 """
 写真取得元（provider）の抽象化層
 
-Immich 以外の取得元（Google Drive 等。PR2 以降）を将来追加できるようにするための
-境界。PR1 時点では Immich のみを実装しており、`ImmichAPI` が `PhotoProvider`
-Protocol を満たす形になっている（.claude/plans/abundant-weaving-kernighan.md PR1）。
+Immich / Google Drive の2つの取得元を実装している。`ImmichAPI`（immich_api.py）
+と `GDriveAPI`（gdrive_api.py）がどちらも `PhotoProvider` Protocol を満たす
+（.claude/plans/abundant-weaving-kernighan.md PR1/PR2）。
 
-このモジュールは `src.immich_api` を **モジュールレベルでは import しない**
-（`create_provider()` の中でだけ遅延 import する）。`immich_api.py` は
-`ProviderError` をこちらから import するため、モジュールレベルで相互 import すると
-循環importになる。
+このモジュールは `src.immich_api` / `src.gdrive_api` を **モジュールレベルでは
+import しない**（`create_provider()` の中でだけ、選ばれた取得元のモジュールだけを
+遅延 import する）。`immich_api.py` は `ProviderError` をこちらから import するため、
+モジュールレベルで相互 import すると循環importになる。`gdrive_api.py` は
+google-auth という重い追加依存を持つため、Immich のみを使う環境（実機の既定構成）
+まで import コストを波及させないためにも遅延 import が必須になる。
 """
 
 import logging
@@ -43,13 +45,21 @@ class PhotoProvider(Protocol):
     - `supports_favorites`: False の取得元では、アルバム選択画面の
       お気に入り仮想エントリを表示しない（`reconcile_settings()` も参照）
     - `delivers_originals`: True の取得元は `PhotoCache` 側で EXIF 補正・
-      画素上限などの原本向け処理が必要になる（PR2 で実装。PR1 では常に False）
+      画素上限などの原本向け処理が必要になる（Immich は False。Drive は
+      `thumbnailLink` が使えなかった場合だけ原本経路を通るため True）
+    - `album_thumbnail_expires`: True の取得元は、キャッシュ済みのアルバム
+      サムネイルが `cache_lifetime_hours` より古くなったら作り直しが要る。
+      Immich は表紙を差し替えると `albumThumbnailAssetId` 自体が変わるため
+      キャッシュキーの不一致で自然に作り直される（False）。Drive はフォルダの
+      表紙を常に固定値 `'cover'`（名前順の先頭画像）で表すため、キーが変わらず
+      作り直しの契機が無い（True。`src/gui/screens/album.py` が判定する）
     """
 
     name: str
     cache_namespace: str
     supports_favorites: bool
     delivers_originals: bool
+    album_thumbnail_expires: bool
 
     def fetch_albums(self) -> list[dict[str, Any]]:
         """ アルバムの一覧を返す（`id` / `albumName` / `albumThumbnailAssetId` を持つ） """
@@ -89,11 +99,10 @@ def create_provider(config: 'ConfigManager',
     """
     環境変数 `PF_PHOTO_PROVIDER` に応じて取得元を生成する。
 
-    未設定・空文字は 'immich'（既定）。'gdrive' は PR2 で実装予定のため、
-    現時点では分かりやすいメッセージの ValueError を送出する。生成に失敗した
-    場合（Immich の資格情報が無い等の ValueError を含む）は呼び出し側
-    （main.py）が今までどおり「起動はするがスライドショーを作らない」扱いに
-    できるよう、ここでは例外を握りつぶさずそのまま伝播させる。
+    未設定・空文字は 'immich'（既定）。生成に失敗した場合（Immich の資格情報が
+    無い、Drive のサービスアカウント鍵が無い等の ValueError を含む）は
+    呼び出し側（main.py）が今までどおり「起動はするがスライドショーを作らない」
+    扱いにできるよう、ここでは例外を握りつぶさずそのまま伝播させる。
     """
     provider_name = (os.environ.get('PF_PHOTO_PROVIDER') or 'immich').strip().lower()
 
@@ -104,9 +113,11 @@ def create_provider(config: 'ConfigManager',
         return ImmichAPI(config, status_callback=status_callback)
 
     if provider_name == 'gdrive':
-        raise ValueError(
-            'PF_PHOTO_PROVIDER=gdrive はまだ実装されていません（PR2 で追加予定です）。'
-            ' immich を指定するか、環境変数を未設定のままにしてください。')
+        # gdrive_api.py はここでだけ遅延 import する。google-auth への依存が
+        # Immich のみを使う環境（実機の既定構成）にまで及ばないようにするため
+        # （src/gdrive_api.py 冒頭のコメント参照）。
+        from src.gdrive_api import GDriveAPI
+        return GDriveAPI(config, status_callback=status_callback)
 
     raise ValueError(f'未知の PF_PHOTO_PROVIDER です: {provider_name!r}')
 

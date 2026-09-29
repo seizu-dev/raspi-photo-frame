@@ -111,6 +111,7 @@ class App:
         try:
             self._provider = create_provider(self._config, status_callback=self._overlay.set_status)
             reconcile_settings(self._config, self._provider)
+            logger.info('写真取得元: %s', self._provider.name)
         except ValueError as e:
             # 資格情報が無い／未実装の取得元が指定された場合でも起動はする。
             # 設定を直せば再試行で拾える
@@ -120,7 +121,17 @@ class App:
         # provider が生成できなかった場合は名前空間なし（Immich と同じ既定）で
         # キャッシュを用意する。写真は表示できないため実害は無い
         namespace = self._provider.cache_namespace if self._provider is not None else ''
-        self._cache = PhotoCache(self._config, display_size=self._renderer.size, namespace=namespace)
+        delivers_originals = self._provider.delivers_originals if self._provider is not None else False
+        self._cache = PhotoCache(self._config, display_size=self._renderer.size, namespace=namespace,
+                                 originals=delivers_originals)
+        if self._provider is not None:
+            # provider は PhotoCache より先に生成するため、実際の表示解像度
+            # （renderer.size）はこの時点で初めて分かる。thumbnailLink の要求寸法の
+            # 計算に使うため、対応する provider（Drive）にだけ渡す
+            # （`set_display_size` を持たない provider は無視してよい任意メソッド）。
+            set_display_size = getattr(self._provider, 'set_display_size', None)
+            if callable(set_display_size):
+                set_display_size(self._renderer.size)
         # 起動時に一度だけ上限を強制する（保存 N 回ごとの間引きとは別に）
         self._cache.enforce_limit(force=True)
 

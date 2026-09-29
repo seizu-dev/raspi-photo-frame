@@ -96,11 +96,20 @@ def main() -> int:
     except ValueError as e:
         logger.error('写真取得元に接続できません: %s', e)
         return 1
+    logger.info('写真取得元: %s', provider.name)
+
+    # main.py と同様、実際にキャッシュを焼くサイズ（--display-size / 既定値）を
+    # provider に伝える。thumbnailLink の要求寸法の計算に使う（Drive のみ。
+    # 持たない provider には無視してよい任意メソッド）
+    set_display_size = getattr(provider, 'set_display_size', None)
+    if callable(set_display_size):
+        set_display_size(display_size)
 
     # namespace は provider ごとにキャッシュのサブディレクトリを分けるための識別子
     # （Immich は空文字で従来どおりの直下配置。.claude/architecture.md
     # 「対で更新が必要な箇所」参照）
-    cache = PhotoCache(config, display_size=display_size, namespace=provider.cache_namespace)
+    cache = PhotoCache(config, display_size=display_size, namespace=provider.cache_namespace,
+                       originals=provider.delivers_originals)
     source = PhotoSource(config, provider, cache)
 
     logger.info('写真リストを取得します: source=%s album_id=%s',

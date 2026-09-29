@@ -46,6 +46,9 @@ class ImmichAPI:
         self.cache_namespace = ''
         self.supports_favorites = True
         self.delivers_originals = False
+        # Immich は表紙を差し替えると albumThumbnailAssetId 自体が変わるため、
+        # 期限切れによる作り直しは不要（photo_provider.py の Protocol docstring参照）。
+        self.album_thumbnail_expires = False
 
     def update_status(self, message: str) -> None:
         """ 進捗を通知する。コールバック未指定でも実機の調査手段としてログには必ず残す """
