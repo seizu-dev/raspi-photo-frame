@@ -141,60 +141,6 @@ docker compose up -d
 runs. If you are working over SSH, detach it with `setsid nohup` and poll the log
 file for the result.
 
-#### Running from just the image (no clone)
-
-If you don't want to clone this repository, save the following as
-`docker-compose.yml` and run it with the published image. It is a trimmed summary of
-this repository's `docker-compose.yml`, kept in sync by hand — if the two ever
-disagree, the file in the repository is the one to trust.
-
-```yaml
-services:
-  app:
-    image: ghcr.io/seizu-dev/raspi-photo-frame:latest
-    restart: unless-stopped   # start on boot; there is no systemd unit
-    init: true                # reaps zombie processes so SIGTERM reaches the app
-
-    user: "1000:1000"         # runs non-root; no --privileged needed
-    group_add:                # GIDs are host-specific: getent group video render input gpio
-      - "${GID_VIDEO:-44}"    # video  -> /dev/dri/card0 (rendering)
-      - "${GID_RENDER:-992}"  # render -> /dev/dri/renderD128 (rendering)
-      - "${GID_INPUT:-996}"   # input  -> /dev/input/* (touch)
-      - "${GID_GPIO:-986}"    # gpio   -> /dev/gpiochip0 (motion sensor)
-
-    devices:
-      - /dev/dri:/dev/dri              # KMSDRM rendering
-      - /dev/input:/dev/input          # USB touch input
-      - /dev/gpiochip0:/dev/gpiochip0  # motion sensor; drop this line if you have none
-
-    volumes:
-      - /run/udev:/run/udev:ro         # required for SDL2 to enumerate input devices
-      - ./config:/config               # settings.json lives here (bind mount, not baked into the image)
-      - photo-cache:/cache             # named volume so photos aren't re-downloaded on recreate
-      - /etc/localtime:/etc/localtime:ro  # local clock without installing tzdata
-
-    environment:
-      SDL_VIDEODRIVER: kmsdrm
-      SDL_RENDER_DRIVER: opengles2     # required; the default "opengl" silently drops draw calls
-      PF_CONFIG_DIR: /config
-      PF_CACHE_DIR: /cache
-
-    env_file:
-      - .env                           # IMMICH_BASE_URL / IMMICH_API_KEY, etc. (see .env.sample)
-
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "3" }   # bounds log growth on the SD card
-
-volumes:
-  photo-cache:
-```
-
-You still need `.env` (copied from `.env.sample`) and `config/settings.json` (copied
-from `config/settings.sample.json`) next to this file — grab those two from the
-repository, or write them by hand following the "Credentials and configuration"
-section above.
-
 ## Controls
 
 | Gesture | Action |
@@ -347,8 +293,9 @@ subfolders of a root folder as albums.
    (found in the JSON key as `client_email`), with **Viewer** access.
 5. Note that folder's ID (the last path segment of its Drive URL).
 
-The `docker-compose.yml` example above already bind-mounts `./config:/config`, so
-the container can read the key file from there without any change to volumes.
+This repository's `docker-compose.yml` already bind-mounts `./config:/config`, so
+placing the key file under `config/` lets the container read it without any change
+to volumes.
 
 ### `.env`
 

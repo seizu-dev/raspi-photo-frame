@@ -133,58 +133,6 @@ docker compose up -d
 **Zero 2 W ではビルドに 10 分以上かかります。** その間 CPU が飽和するため、
 SSH 越しに実行する場合は `setsid nohup` で切り離し、ログをポーリングして回収してください。
 
-#### リポジトリを clone せず、イメージだけで動かす
-
-リポジトリを clone したくない場合は、次の内容を `docker-compose.yml` として保存し、
-公開イメージで起動できます。これはリポジトリの `docker-compose.yml` の要約で、
-手作業で内容を合わせています。**食い違いがあれば、リポジトリのファイルを正としてください。**
-
-```yaml
-services:
-  app:
-    image: ghcr.io/seizu-dev/raspi-photo-frame:latest
-    restart: unless-stopped   # 起動時に自動起動する。systemd ユニットは無い
-    init: true                # ゾンビプロセスを回収し、SIGTERM がアプリへ確実に届くようにする
-
-    user: "1000:1000"         # 非rootで動く。--privileged は不要
-    group_add:                # GID はホスト固有。getent group video render input gpio で確認する
-      - "${GID_VIDEO:-44}"    # video  -> /dev/dri/card0（描画）
-      - "${GID_RENDER:-992}"  # render -> /dev/dri/renderD128（描画）
-      - "${GID_INPUT:-996}"   # input  -> /dev/input/*（タッチ）
-      - "${GID_GPIO:-986}"    # gpio   -> /dev/gpiochip0（人感センサー）
-
-    devices:
-      - /dev/dri:/dev/dri              # KMSDRM 描画
-      - /dev/input:/dev/input          # USB タッチ入力
-      - /dev/gpiochip0:/dev/gpiochip0  # 人感センサー用。無ければこの行を外してよい
-
-    volumes:
-      - /run/udev:/run/udev:ro         # 無いと SDL2 が入力デバイスを列挙できない
-      - ./config:/config               # settings.json の置き場所（bind mount。イメージには焼かない）
-      - photo-cache:/cache             # named volume。再作成のたびに再ダウンロードしないため
-      - /etc/localtime:/etc/localtime:ro  # tzdata を別途入れずにローカル時刻にする
-
-    environment:
-      SDL_VIDEODRIVER: kmsdrm
-      SDL_RENDER_DRIVER: opengles2     # 必須。既定の opengl では描画命令が黙って無視される
-      PF_CONFIG_DIR: /config
-      PF_CACHE_DIR: /cache
-
-    env_file:
-      - .env                           # IMMICH_BASE_URL / IMMICH_API_KEY 等（.env.sample 参照）
-
-    logging:
-      driver: json-file
-      options: { max-size: "10m", max-file: "3" }   # SD カードでログが無制限に増えないようにする
-
-volumes:
-  photo-cache:
-```
-
-このファイルと同じ場所に `.env`（`.env.sample` から作成）と `config/settings.json`
-（`config/settings.sample.json` から作成）も必要です。この2つはリポジトリから
-取得するか、上記「資格情報と設定」の内容に沿って自分で用意してください。
-
 ## 操作
 
 | 操作 | 動作 |
@@ -323,8 +271,8 @@ Immich の代わりに、Google Drive の共有フォルダから写真を表示
    `client_email`）へ「閲覧者」権限で共有します。
 5. そのフォルダの ID（Drive の URL の末尾）を控えます。
 
-上記の docker-compose の例は既に `./config:/config` を bind mount しているので、
-ボリューム設定を変えなくても鍵ファイルをコンテナから読めます。
+リポジトリの `docker-compose.yml` は既に `./config:/config` を bind mount しているので、
+鍵ファイルを `config/` 直下に置けば、volumes の設定を変えなくてもコンテナから読めます。
 
 ### `.env`
 
