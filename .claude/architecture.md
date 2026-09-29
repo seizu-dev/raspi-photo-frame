@@ -98,9 +98,14 @@ Dockerfile                  実行イメージ（arm64 / python:3.13-slim ベー
 docker-compose.yml          デバイスパススルー・非root・ボリューム定義
 main.py                     アプリケーションループ / 画面遷移
 src/
-  immich_api.py             Immich API クライアント（photo-frame から移植・改修）
-  photo_cache.py            表示解像度確定済み画像のディスクキャッシュ（再設計）
-  photo_source.py           API とキャッシュを繋ぐ層（新規。フォールバックと表示順）
+  photo_provider.py         写真取得元（provider）の抽象化層（新規。Protocol / 工場関数 /
+                            起動時の設定整合。PR1: .claude/plans/abundant-weaving-kernighan.md）
+  immich_api.py             Immich API クライアント（photo-frame から移植・改修。
+                            PhotoProvider Protocol を満たす）
+  photo_cache.py            表示解像度確定済み画像のディスクキャッシュ（再設計。
+                            取得元ごとに namespace でサブディレクトリを分ける）
+  photo_source.py           provider とキャッシュを繋ぐ層（新規。フォールバックと表示順。
+                            favorites/album/daily_pickup の振り分けもここで持つ）
   daily_pickup_manager.py   デイリーピックアップ（移植）
   config_manager.py         設定の読み書き（移植）
   motion_sensor.py          AM312 人感センサー（gpiod で再実装）
@@ -346,3 +351,45 @@ src/
     テクスチャ側だけを破棄する `release_labels()` とは別物）の両方を行う。
     **SDL の世代の変化だけならテクスチャの破棄で足りるが、言語の変化はそれに加えて
     この2つが要る**（アルバム一覧の再取得は言語が変わっても絶対に行わない）
+-   写真取得元の抽象化（PR1。`.claude/plans/abundant-weaving-kernighan.md`）で
+    生まれた組。取得元を追加するとき（PR2 の Google Drive 等）は以下をすべて確認する。
+    -   `PF_PHOTO_PROVIDER` 環境変数 ↔ `photo_provider.py` の `create_provider()` の
+        分岐 ↔ `.env.sample` のコメント ↔ README の資格情報節（PR2 で Drive の
+        セットアップを書き足すときに追記する）
+    -   `PhotoProvider.cache_namespace` ↔ `PhotoCache.__init__` の `namespace` 引数
+        （`photos/<ns>/` 等へのサブディレクトリ分け）↔ `enforce_limit()` /
+        `get_total_size()` が見るルート（`self._photos_root` = 常に
+        `cache_dir/photos` 直下。**namespace を持つインスタンスでも全取得元ぶんを
+        合算する**契約を崩さない）↔ `cleanup_thumbnails()` / `cleanup_list_cache()`
+        は逆に**自分の namespace 直下だけ**（非再帰の `glob`）を見る契約。
+        **Immich は `cache_namespace = ''` で既存キャッシュのパスと1バイトも
+        変わらない**ことが PR1 の通過条件だった
+    -   `PhotoProvider.supports_favorites` ↔ `gui/screens/album.py` の
+        `_fetch_albums_worker()`（お気に入りの仮想エントリを出すかどうか）↔
+        `_restore_selection()`（固定 index ではなく `_find_entry_index()` で探す。
+        お気に入りが無い取得元では仮想エントリの並びが1つ繰り上がるため）↔
+        `photo_provider.reconcile_settings()`（`source == 'favorites'` なのに
+        非対応の取得元へ切り替わったときに `daily_pickup` へ寄せる保険）
+    -   `PhotoProvider.delivers_originals` ↔ `PhotoCache` 側の原本向け処理
+        （EXIF 補正・画素上限。PR1 では常に False で未実装。PR2 で Drive の
+        原本経路を追加するときに配線する）
+    -   `PhotoCache.store_thumbnail()` の短辺 `THUMBNAIL_MAX_SHORT_SIDE`（250px）
+        への縮小（拡大はしない）↔ `gui/screens/album.py` の `_AlbumCell` が
+        描くサムネイル領域（232x232 の正方形セルへ中央クロップして表示するため、
+        250px を下回ることは想定していない）。**Immich のサムネイル
+        （333x250 / 444x250）は短辺がちょうど 250px なのでこの処理で縮小されない**
+        （寸法が変わらないことが PR1 の通過条件だった）
+    -   `_DECODE_LOCK`（`photo_cache.py` のモジュールレベルのロック）↔
+        Pillow でデコードする全箇所（`_encode_jpeg()` 経由の写真本体・サムネイルの
+        両方）。プロセス全体で1本にしてあるのは、原本を扱う取得元（PR2）の
+        同時デコードでピークメモリが跳ね上がるのを防ぐため
+    -   `active_provider`（`config_manager.py` の既定値 `""`。画面のウィジェットは
+        持たない実行時状態） ↔ `photo_provider.reconcile_settings()`（前回と取得元が
+        変わったときだけ `album_id` 等を初期化する）。**`""` → `'immich'` の遷移では
+        何も初期化しない**（既存の実機の `settings.json` がアップデートのたびに
+        消えるのを防ぐため）
+    -   `src/immich_api.py` の `fetch_assets_info()` / `_fetch_daily_pickup_assets_info()`
+        等の**旧経路は後方互換のためそのまま残してあり、`PhotoSource` はもう
+        呼ばない**（`tools/verification/album_grid_bench.py` の
+        `SyntheticAlbumAPI(ImmichAPI)` が `fetch_albums()` / `download_asset()` を
+        直接使い続けるため）。ImmichAPI の既存メソッドを消したり改名したりしないこと

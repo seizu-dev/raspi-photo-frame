@@ -29,5 +29,6 @@
     "daily_pickup_count": 3,
     "daily_pickup_date": "",
     "daily_pickup_selected_ids": [],
-    "daily_pickup_remaining_ids": []
+    "daily_pickup_remaining_ids": [],
+    "active_provider": ""
 }

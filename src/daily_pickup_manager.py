@@ -37,12 +37,19 @@ class DailyPickupManager:
         selected_ids = self.config.get('daily_pickup_selected_ids', [])
         remaining_ids = self.config.get('daily_pickup_remaining_ids', [])
 
-        # 同じ日はキャッシュされた選択を返す（存在するアルバムのみ）
+        # 同じ日はキャッシュされた選択を返す（存在するアルバムのみ）。
+        # フィルタ後に1件も残らなかった場合（取得元の切り替えやアルバム削除で
+        # 選択済みIDが全滅した場合）は return せず、下の通常ローテーションへ進む。
+        # ここで空リストを return してしまうと、日付が変わるまで（最大24時間）
+        # 写真が1枚も表示されない状態が固定されてしまう。
         if last_date == today and selected_ids:
             all_set = set(all_album_ids)
-            return [aid for aid in selected_ids if aid in all_set]
+            filtered = [aid for aid in selected_ids if aid in all_set]
+            if filtered:
+                return filtered
+            logger.warning('選択済みアルバムが全て存在しないため、同日内でも選び直します')
 
-        # 日付が変わった → ローテーションを進める
+        # 日付が変わった、または同日内の選択が全滅した → ローテーションを進める
         all_set = set(all_album_ids)
 
         # 残キューを現存するアルバムのみに絞る

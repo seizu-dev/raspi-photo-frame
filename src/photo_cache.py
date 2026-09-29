@@ -46,6 +46,20 @@ UTIME_MIN_INTERVAL_SEC = 3600
 # 容量の実走査は保存のたびには行わない（数千ファイルの stat がスライド表示を妨げるため）
 ENFORCE_EVERY_N_STORES = 20
 
+# アルバムサムネイルの短辺上限。Immich のサムネイルは既に 333x250 / 444x250 程度で
+# 短辺がちょうど 250px のため、この値では縮小されない（変わらないことを実測で確認済み）。
+# Drive 等（PR2）は縮小前のサムネイルを返しうるため、短辺がこれを超える場合だけ
+# 縮小する（拡大はしない・アスペクト比は維持する）。
+THUMBNAIL_MAX_SHORT_SIDE = 250
+
+# プロセス全体で1本のデコードロック。原本を扱う取得元（Google Drive 等。PR2 で追加）は
+# HEIC 等のデコード前サイズが大きい画像をそのまま開くことがあり、先読みスレッドと
+# アルバムサムネイル取得スレッドが同時にデコードするとピークメモリが跳ね上がる
+# （RAM 512MB が最大の制約のため、デコード〜エンコードの区間はプロセス全体で
+# 直列化してピークを抑える。Immich の preview/thumbnail はそこまで大きくないが、
+# 取得元によらず同じ経路を通るここで一律に直列化する）。
+_DECODE_LOCK = threading.Lock()
+
 
 def normalize_fit(value: Any) -> str:
     """
@@ -128,14 +142,29 @@ class PhotoCache:
     """
 
     def __init__(self, config_manager: 'ConfigManager', cache_dir: str | Path | None = None,
-                 display_size: tuple[int, int] = DEFAULT_DISPLAY_SIZE) -> None:
+                 display_size: tuple[int, int] = DEFAULT_DISPLAY_SIZE,
+                 namespace: str = '') -> None:
+        """
+        `namespace` は取得元ごとにキャッシュのサブディレクトリを分けるための識別子
+        （`PhotoProvider.cache_namespace`。.claude/architecture.md「対で更新が必要な
+        箇所」参照）。**空文字（Immich）は従来どおり `photos/` 等の直下を使う**ため、
+        既存キャッシュのパスは1つも変わらない。空文字以外を渡すと
+        `photos/<namespace>/` のようにサブディレクトリへ分離される。
+        """
         self.config = config_manager
         self.cache_dir = Path(cache_dir) if cache_dir else resolve_cache_dir()
         self.display_size = display_size
+        self.namespace = namespace
 
-        self.photos_dir = self.cache_dir / 'photos'
-        self.lists_dir = self.cache_dir / 'lists'
-        self.thumbs_dir = self.cache_dir / 'thumbs'
+        # 容量の上限（enforce_limit / get_total_size）は取得元をまたいで1つ。
+        # namespace を持つインスタンスでも、このルートを rglob して全取得元ぶんを
+        # 合算する（.claude/architecture.md「対で更新が必要な箇所」参照）。
+        self._photos_root = self.cache_dir / 'photos'
+
+        ns_parts = (_safe_name(namespace),) if namespace else ()
+        self.photos_dir = self._photos_root.joinpath(*ns_parts)
+        self.lists_dir = self.cache_dir.joinpath('lists', *ns_parts)
+        self.thumbs_dir = self.cache_dir.joinpath('thumbs', *ns_parts)
         for d in (self.photos_dir, self.lists_dir, self.thumbs_dir):
             d.mkdir(parents=True, exist_ok=True)
 
@@ -171,7 +200,7 @@ class PhotoCache:
         self._touch(path)
         return path
 
-    def store_photo(self, asset_id: str, raw: bytes) -> Path | None:
+    def store_photo(self, asset_id: str, raw: bytes | Path) -> Path | None:
         """
         ダウンロードした画像を表示解像度へ確定させて保存する。
 
@@ -262,7 +291,7 @@ class PhotoCache:
                 self._unlink(old, '古いサムネイル')
         return None
 
-    def store_thumbnail(self, album_id: str, thumbnail_id: str, raw: bytes) -> Path | None:
+    def store_thumbnail(self, album_id: str, thumbnail_id: str, raw: bytes | Path) -> Path | None:
         """
         アルバムサムネイルを保存する。
 
@@ -339,7 +368,7 @@ class PhotoCache:
             limit = limit_mb * 1024 * 1024
 
             entries, total = [], 0
-            for path in self.photos_dir.rglob('*.jpg'):
+            for path in self._photos_root.rglob('*.jpg'):
                 try:
                     st = path.stat()
                 except OSError:
@@ -364,9 +393,9 @@ class PhotoCache:
             return removed
 
     def get_total_size(self) -> int:
-        """ 写真本体の総バイト数を返す（設定画面での表示用） """
+        """ 写真本体の総バイト数を返す（設定画面での表示用。取得元をまたいで合算する） """
         total = 0
-        for path in self.photos_dir.rglob('*.jpg'):
+        for path in self._photos_root.rglob('*.jpg'):
             try:
                 total += path.stat().st_size
             except OSError:
@@ -384,18 +413,25 @@ class PhotoCache:
 
     # ------------------------------------------------------------------ 内部処理
 
-    def _encode_jpeg(self, raw: bytes, max_size: tuple[int, int] | None,
+    def _encode_jpeg(self, raw: bytes | Path, max_size: tuple[int, int] | None,
                      fit: str = FIT_CONTAIN) -> bytes | None:
         """
         画像を JPEG バイト列へ変換する。max_size が指定されていれば表示解像度へ確定させる。
 
-        Immich の preview は JPEG と WebP の両方が返るため、フォーマットを前提にしない。
-        `fit` は max_size 指定時（写真本体）にのみ意味を持つ。サムネイル保存
-        （max_size=None、store_thumbnail() 経由）では参照されず、常に現行どおり
-        「収める」経路（実質 thumbnail() すら通らない no-op）のままになる。
+        `raw` は `bytes`（Immich 等、原本をメモリへ受け取る取得元）と `Path`
+        （原本をファイルへストリーミング保存する取得元。PR2 の Drive 原本経路向け）の
+        両方を受け付ける。Immich の preview は JPEG と WebP の両方が返るため、
+        フォーマットを前提にしない。`fit` は max_size 指定時（写真本体）にのみ意味を持つ。
+        サムネイル保存（max_size=None、store_thumbnail() 経由）では参照されず、
+        代わりに短辺 THUMBNAIL_MAX_SHORT_SIDE への縮小（拡大はしない）だけを行う。
+
+        デコード〜エンコードの区間はプロセス全体で1本のロックに通す
+        （_DECODE_LOCK のコメント参照。原本を扱う取得元の同時デコードによる
+        ピークメモリを避けるため）。
         """
+        source = raw if isinstance(raw, Path) else BytesIO(raw)
         try:
-            with Image.open(BytesIO(raw)) as img:
+            with _DECODE_LOCK, Image.open(source) as img:
                 if max_size and img.format == 'JPEG':
                     # draft() は JPEG のみ有効。1/2・1/4 スケールで直接デコードして
                     # デコード負荷とピークメモリを削る。他形式では何も起きない。
@@ -423,6 +459,19 @@ class PhotoCache:
                     else:
                         # thumbnail() はアスペクト比を保ち、元より大きくはしない
                         img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                else:
+                    # サムネイル保存経路（store_thumbnail() 経由）。Immich のサムネイルは
+                    # 既に短辺 250px 程度（333x250 / 444x250）のためここでは縮小されない
+                    # （寸法が変わらないことを実測で確認済み）。Drive 等（PR2）が
+                    # 縮小前のサムネイルを返す場合に備え、短辺が上限を超えるときだけ
+                    # 縮小する（拡大はしない・アスペクト比は維持する）。
+                    img_w, img_h = img.size
+                    short_side = min(img_w, img_h)
+                    if short_side > THUMBNAIL_MAX_SHORT_SIDE:
+                        scale = THUMBNAIL_MAX_SHORT_SIDE / short_side
+                        img = img.resize(
+                            (max(1, round(img_w * scale)), max(1, round(img_h * scale))),
+                            Image.Resampling.LANCZOS)
 
                 # RGBA / P モードのままでは JPEG で保存できない
                 rgb = img if img.mode == 'RGB' else img.convert('RGB')
@@ -433,8 +482,10 @@ class PhotoCache:
                     if rgb is not img:
                         rgb.close()
                 return buf.getvalue()
-        except (UnidentifiedImageError, OSError, ValueError) as e:
-            # 壊れたデータや未対応形式は握ってスキップする（1枚のために停止させない）
+        except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as e:
+            # 壊れたデータ・未対応形式・巨大画像（画素上限超過）は握ってスキップする
+            # （1枚のために停止させない。DecompressionBombError は Exception 直系で
+            # OSError ではないため、別途 except に含める必要がある）
             logger.warning('画像を変換できませんでした: %s', e)
             return None
 

@@ -123,6 +123,12 @@ Immich からの画像取得は帯域制約を前提とし、**原寸画像を�
 
 ### 3.3. 主要ライブラリ
 
+**写真取得元は `src/photo_provider.py` の `PhotoProvider` Protocol で抽象化している。**
+現時点で実装済みなのは Immich（`src/immich_api.py`）のみで、環境変数
+`PF_PHOTO_PROVIDER`（既定 `immich`）で選択する。Google Drive 等の追加取得元は
+今後の対応（`.claude/plans/abundant-weaving-kernighan.md`）とし、抽象化を先に入れても
+Immich 単体での挙動・キャッシュのファイルパスは一切変えない。
+
 *   `pygame-ce` — GUI / 描画
 *   `requests` — Immich API 通信
 *   `Pillow` — 画像デコード・リサイズ（キャッシュ生成時）
@@ -920,7 +926,8 @@ Kivy 由来の依存（GStreamer 一式 / `libmtdev` / wayland / `npm`）は持�
     置くことで、本番の `docker compose build`（`target` 未指定）は従来どおり `runtime` を生成する。
     `dev` は `docker-compose.dev.yml`（`target: dev`）からのみ使う。
 *   **開発用の Immich は立てない。** 既存のセルフホスト Immich を `.env` の
-    `IMMICH_BASE_URL` / `IMMICH_API_KEY` で指す。
+    `IMMICH_BASE_URL` / `IMMICH_API_KEY` で指す。写真取得元は `.env` の
+    `PF_PHOTO_PROVIDER`（既定 `immich`）で選ぶ（3.3節参照）。
 *   **Python 依存はイメージに焼く（venv 無し）。** `base` ステージで pip install 済みのため、
     階層1と階層3で同一バージョンを保証する。
 *   **解像度は実機と同じ 1024x600。** `.devcontainer/start-vnc.sh` の Xvfb / x11vnc も
