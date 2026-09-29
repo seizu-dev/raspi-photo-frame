@@ -72,10 +72,12 @@ video=HDMI-A-1:1024x600MR@50e
 
 ### ホスト側の準備
 
-1. `/boot/firmware/config.txt` で Full KMS（`dtoverlay=vc4-kms-v3d`）を有効にします
-2. 上記の `video=` 指定を `cmdline.txt` に追加します
-3. zram swap を有効にします（RAM 512MB の保険）
-4. フレームバッファコンソールを切り離します（消灯・復帰のたびにコンソールの文字が
+1. `/boot/firmware/config.txt` に `dtoverlay=vc4-kms-v3d`（Full KMS）があることを
+   確認します。現行の Raspberry Pi OS では既定で有効ですが、描画と消灯の両方が
+   これに依存しています
+2. 画面に何も映らない場合だけ、`cmdline.txt` に `video=` 指定を追加します
+   （上記の [モード指定の節](#2-cmdlinetxt-のモード指定) を参照）
+3. フレームバッファコンソールを切り離します（消灯・復帰のたびにコンソールの文字が
    一瞬見えるのを防ぐため）
 
 ```bash

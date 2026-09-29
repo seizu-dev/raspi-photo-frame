@@ -78,10 +78,12 @@ a couple of environment variables.
 
 ### Preparing the host
 
-1. Enable Full KMS (`dtoverlay=vc4-kms-v3d`) in `/boot/firmware/config.txt`
-2. Add the `video=` line above to `cmdline.txt`
-3. Enable zram swap (insurance against the 512 MB limit)
-4. Detach the framebuffer console, so console text does not flash on screen every
+1. Check that `/boot/firmware/config.txt` contains `dtoverlay=vc4-kms-v3d` (Full KMS).
+   It is enabled by default on current Raspberry Pi OS, but rendering and display
+   sleep both depend on it
+2. Only if nothing appears on screen: add a `video=` line to `cmdline.txt`
+   (see [the mode line section](#2-a-mode-line-in-cmdlinetxt) above)
+3. Detach the framebuffer console, so console text does not flash on screen every
    time the display sleeps or wakes
 
 ```bash
