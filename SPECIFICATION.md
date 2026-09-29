@@ -90,7 +90,8 @@ Immich からの画像取得は帯域制約を前提とし、**原寸画像を�
 *   **デスクトップ環境**: なし（X11 / Wayland を導入しない）
 *   **Graphics Backend**: SDL2 の **KMSDRM** ドライバ（`SDL_VIDEODRIVER=kmsdrm`）
     *   コンソールから直接 DRM/KMS 経由で描画し、ウィンドウシステムを介さない
-    *   `config.txt` で Full KMS ドライバを有効にすること（`dtoverlay=vc4-kms-v3d`、実機は設定済み）
+    *   `config.txt` で Full KMS ドライバ（`dtoverlay=vc4-kms-v3d`）が有効であることが前提
+        （現行の Raspberry Pi OS では既定で有効）
 *   **レンダードライバ**: **`SDL_RENDER_DRIVER=opengles2` の指定が必須**
     *   既定の `opengl` では**テクスチャ描画が黙って無視され、画面に何も出ない**（第9章 9-10）
     *   VideoCore IV が対応するのは OpenGL ES 2.0 のみ
@@ -976,8 +977,8 @@ JPEG/PNG/WebP に限った例外経路として扱う方針**（PR2）を採っ�
 Raspberry Pi Zero 2 W (ARM64) が LAN 内で稼働しており、**SSH でアクセスできる**。
 Docker とリモート管理 UI のエージェントが導入済みで、リモート運用されている。
 
-*   **Full KMS 有効化**: `config.txt` にて設定（ホスト側）。
-*   **zram swap**: 512MB の保険として有効化する（ホスト側）。
+*   **Full KMS**: `config.txt` の `dtoverlay=vc4-kms-v3d`。OS の既定で有効（ホスト側。確認のみ）。
+*   **zram swap**: OS の既定（`rpi-swap` パッケージ）で有効。512MB の保険になる（ホスト側。作業不要）。
 *   **自動起動**: `docker-compose.yml` の `restart: unless-stopped` による。
 
 ### 10.2. 開発環境

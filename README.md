@@ -16,6 +16,7 @@ pipeline were both worked backwards from that limit.
 ## Features
 
 - Pulls photos from an Immich album, your favorites, or a daily pickup rotation
+  (a shared Google Drive folder works too — see the appendix below)
 - Four transition effects (crossfade, fade to black, slide, wipe) plus random selection
 - Three ways to fit a photo to the screen (contain, cover, or cover only when the
   orientation matches)
@@ -35,13 +36,16 @@ pipeline were both worked backwards from that limit.
 | Display | A mini HDMI display plus a USB touch panel (1024x600) |
 | Sensor | AM312 PIR motion sensor (GPIO 18, optional) |
 | Other | microSD card, 16 GB or larger, and a power supply |
-| Server | A self-hosted Immich instance |
+| Server | A self-hosted Immich instance (or a shared Google Drive folder — see the appendix) |
 
 **The Zero 2 W has no DSI connector.** The official Raspberry Pi touch display
 (which connects over DSI) cannot be used, so this project assumes mini HDMI plus a
 USB touch panel.
 
-## Required settings (without these, nothing appears on screen)
+## If nothing appears on screen
+
+Two settings are behind a blank screen. The first is always required and is already
+in place; the second depends on your hardware.
 
 ### 1. `SDL_RENDER_DRIVER=opengles2`
 
@@ -55,27 +59,36 @@ environment variables during debugging.
 
 ### 2. A mode line in `cmdline.txt`
 
-`/boot/firmware/cmdline.txt` needs this entry:
+Depending on your mini HDMI adapter and panel, `/boot/firmware/cmdline.txt` may need
+a mode line. The hardware this was developed against needed this one:
 
 ```
 video=HDMI-A-1:1024x600MR@50e
 ```
 
-On the hardware this was developed against, the mini HDMI adapter could not carry a
-pixel clock at or above 40 MHz, so the standard 1024x600@60 (51.5 MHz) produced no
-picture at all. With the line above it runs at 1024x600 @ 49.61 Hz / 36.36 MHz.
+There, the mini HDMI adapter could not carry a pixel clock at or above 40 MHz, so the
+standard 1024x600@60 (51.5 MHz) produced no picture at all. With the line above it
+runs at 1024x600 @ 49.61 Hz / 36.36 MHz.
 
-The value you need depends on your adapter and panel. Section 9-9 of
+If your display works without it, you don't need it. If it doesn't, the value you
+need depends on your adapter and panel. Section 9-9 of
 [SPECIFICATION.md](SPECIFICATION.md) walks through how this was isolated.
 
 ## Setup
 
+This section covers the default path: Immich as the photo source. If you want to use
+a shared Google Drive folder instead, finish this section first, then see the
+[appendix](#appendix-using-google-drive-as-the-photo-source) below — it only changes
+a couple of environment variables.
+
 ### Preparing the host
 
-1. Enable Full KMS (`dtoverlay=vc4-kms-v3d`) in `/boot/firmware/config.txt`
-2. Add the `video=` line above to `cmdline.txt`
-3. Enable zram swap (insurance against the 512 MB limit)
-4. Detach the framebuffer console, so console text does not flash on screen every
+1. Check that `/boot/firmware/config.txt` contains `dtoverlay=vc4-kms-v3d` (Full KMS).
+   It is enabled by default on current Raspberry Pi OS, but rendering and display
+   sleep both depend on it
+2. Only if nothing appears on screen: add a `video=` line to `cmdline.txt`
+   (see [the mode line section](#2-a-mode-line-in-cmdlinetxt) above)
+3. Detach the framebuffer console, so console text does not flash on screen every
    time the display sleeps or wakes
 
 ```bash
@@ -102,53 +115,6 @@ Your Immich API key only needs three permissions (confirmed against Immich 2.7.5
 Nothing else is used, including `asset.download`. If a permission is missing, Immich
 responds with `403` and `Missing required permission: <name>`
 (`tools/verification/immich_probe.py` can help narrow it down).
-
-#### Using Google Drive instead of Immich
-
-Set `PF_PHOTO_PROVIDER=gdrive` in `.env` to read photos from a shared Google Drive
-folder instead of Immich. This uses a service account (SA), not your personal
-Google login.
-
-1. In the Google Cloud console, create (or pick) a project and enable the
-   **Google Drive API**.
-2. Create a **service account** and download its JSON key.
-3. Place the key file where the container can read it, and point
-   `GDRIVE_SA_KEY_FILE` at it (default: `gdrive-service-account.json` inside the
-   config directory, i.e. the same bind-mounted directory as `settings.json`).
-   Keep the permissions tight (`chmod 600`) and make sure it's readable by uid 1000.
-   **Do not commit this file** — `.gitignore` already excludes `/config/*.json`
-   other than the sample settings file.
-4. Share the folder you want to display with the service account's email address
-   (found in the JSON key as `client_email`), with **Viewer** access.
-5. Set `GDRIVE_ROOT_FOLDER_ID` to that folder's ID (the last path segment of its
-   Drive URL).
-
-Folder layout rules:
-
-*   Each subfolder directly under the root is treated as one album.
-*   Photos placed directly in the root (not inside a subfolder) are grouped into a
-    single virtual "Unsorted" album.
-*   Only the immediate contents of a folder are read — nested sub-subfolders and
-    shortcuts are ignored.
-
-Supported formats are JPEG, PNG, WebP, HEIC and HEIF. The app prefers Drive's own
-server-side thumbnail rendering (which also applies EXIF/HEIF rotation and converts
-HEIC to JPEG/PNG), falling back to downloading the original file only for
-JPEG/PNG/WebP when that isn't available. **HEIC/HEIF originals are never decoded
-on-device** — decoding a full-resolution HEIC photo can peak well over the memory
-this device has (measured ~600MB for a 48MP HEIC), so if Drive's thumbnail service
-can't render a given HEIC/HEIF file, it simply won't be shown. The `=wWIDTH-hHEIGHT`
-thumbnail sizing used here is an observed behavior of Drive's thumbnail links, not
-something documented in the official API reference, so it could change.
-
-Google Drive doesn't support a "favorites" source (there's no equivalent concept),
-so only the album and daily-pickup sources are available when using it.
-
-An album's cover thumbnail is the first image in the folder, sorted by name, and
-is refreshed once the cached copy is older than `cache_lifetime_hours` (a setting
-in the settings screen) — unlike Immich, where the cover's identity itself changes
-when you replace it, Drive's cover is always keyed by the folder, so the cache
-needs an age check to notice a new leading photo.
 
 `GID_*` in `.env` holds device group IDs, and **these differ from host to host.**
 Check them on your own machine before filling them in:
@@ -313,6 +279,66 @@ the app is unaffected either way** — `.claude/context/` is not required for ei
   to release it before sleeping
 - **While the display is off there is no SDL, so pygame events are unavailable.**
   Waking on touch is done by reading `/dev/input` directly
+
+## Appendix: Using Google Drive as the photo source
+
+Instead of Immich, the app can show photos from a shared Google Drive folder. It
+authenticates as a service account (SA), not a personal Google login, and reads
+subfolders of a root folder as albums.
+
+### Setup
+
+1. In the Google Cloud console, create (or pick) a project and enable the
+   **Google Drive API**.
+2. Create a **service account** and download its JSON key.
+3. Place the key file where the container can read it (e.g. inside `config/`, the
+   same bind-mounted directory as `settings.json`). Keep the permissions tight
+   (`chmod 600`) and make sure it's readable by uid 1000. **Do not commit this
+   file** — `.gitignore` already excludes JSON files in `config/` other than the
+   sample settings file.
+4. Share the folder you want to display with the service account's email address
+   (found in the JSON key as `client_email`), with **Viewer** access.
+5. Note that folder's ID. Open the folder in Google Drive in a browser; the ID is the
+   part of the address bar after `/folders/`:
+
+   ```
+   https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUvWxYz_EXAMPLE?usp=sharing
+                                          └─────────── folder ID ───────────┘
+   ```
+
+   Leave out anything after it, such as `?usp=sharing`. The same ID also appears in
+   the link you get from "Share" → "Copy link".
+
+This repository's `docker-compose.yml` already bind-mounts `./config:/config`, so
+placing the key file under `config/` lets the container read it without any change
+to volumes.
+
+### `.env`
+
+```bash
+PF_PHOTO_PROVIDER=gdrive
+GDRIVE_ROOT_FOLDER_ID=<the folder ID from step 5>
+# Only needed if the key isn't at the default path (config/gdrive-service-account.json):
+# GDRIVE_SA_KEY_FILE=/config/gdrive-service-account.json
+```
+
+### Folder layout
+
+- Each subfolder directly under the root is treated as one album.
+- Photos placed directly in the root (not inside a subfolder) are grouped into a
+  single virtual "Unsorted" album.
+- Only the immediate contents of a folder are read — nested sub-subfolders and
+  shortcuts are ignored.
+
+### Limitations
+
+- Supported formats: JPEG, PNG, WebP, HEIC, HEIF.
+- There is no "favorites" source with Google Drive — only album and daily-pickup
+  selection are available.
+- An album's cover is the first image in the folder, sorted by name.
+
+Details on how HEIC/HEIF are handled (and why) are in section 9-11 of
+[SPECIFICATION.md](SPECIFICATION.md).
 
 ## License
 
