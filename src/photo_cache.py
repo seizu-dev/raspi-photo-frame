@@ -23,6 +23,18 @@ DEFAULT_CACHE_DIR = './cache'
 DEFAULT_DISPLAY_SIZE = (1024, 600)
 JPEG_QUALITY = 90
 
+# 原本を扱う取得元（`self.originals=True`。Google Drive の原本経路）の写真本体だけに
+# 使う保存設定。既定（Immich）の quality=90・subsampling 未指定（Pillow 既定 4:2:0）は
+# 変えない（save() の引数を増やすと既存キャッシュとバイト単位で変わりうるため）。
+# 4:2:0 の色差間引きがイラストの線まわりに色にじみ・ノイズを出していたため、
+# 原本モードの写真本体だけ quality=95 / 4:4:4（subsampling=0）へ上げる。
+# 階層1の実測（原本から LANCZOS 縮小した基準との PSNR、取得 `=w2048-h1200`）:
+# イラスト 30.7dB（q90/4:2:0）→ 33.9dB（q95/4:4:4）、写真 34.2 → 38.6dB。
+# キャッシュ1枚は約1.75倍（88KB→155KB）に増えるが、展開後のテクスチャのメモリは不変
+# （どちらも JPEG をデコードすれば同じ 1024x600x4 の RGBA になるため）。
+ORIGINALS_JPEG_QUALITY = 95
+ORIGINALS_JPEG_SUBSAMPLING = 0
+
 # 写真の表示方法。設定画面・main.py はここから import して重複定義を避ける
 # （gui/transitions.py の TRANSITION_VALUES と同じ扱い）。
 FIT_CONTAIN = 'contain'  # 写真全体が収まる（余白あり）。現行の既定挙動
@@ -563,7 +575,14 @@ class PhotoCache:
                 rgb = img if img.mode == 'RGB' else img.convert('RGB')
                 buf = BytesIO()
                 try:
-                    rgb.save(buf, format='JPEG', quality=JPEG_QUALITY)
+                    # 原本モードの写真本体（max_size 指定あり）だけ品質設定を上げる。
+                    # 表紙（max_size=None）は原本モードでも現行の設定のまま
+                    # （Immich 側の出力はここでバイト単位を変えない）。
+                    if self.originals and max_size:
+                        rgb.save(buf, format='JPEG', quality=ORIGINALS_JPEG_QUALITY,
+                                  subsampling=ORIGINALS_JPEG_SUBSAMPLING)
+                    else:
+                        rgb.save(buf, format='JPEG', quality=JPEG_QUALITY)
                 finally:
                     if rgb is not img:
                         rgb.close()

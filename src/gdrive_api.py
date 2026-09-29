@@ -76,6 +76,15 @@ TOKEN_REFRESH_MARGIN_SEC = 300
 # 上限の無いダウンロードを許さない）。
 MAX_ORIGINAL_BYTES = 40 * 1024 * 1024
 
+# thumbnailLink の要求寸法に掛ける倍率。表示サイズちょうどで要求すると Drive 側の
+# 縮小アルゴリズムの画質が低い（階層1で実測: 原本を手元で LANCZOS 縮小した基準に
+# 対して PSNR 28.3dB（イラスト）/ 36.7dB（写真）にとどまる）。表示サイズの2倍で
+# 要求し、最終的な縮小・切り抜きは PhotoCache._encode_jpeg() の LANCZOS に任せると
+# 34.5dB / 41.4dB まで改善する。転送量は約2.9倍に増える（イラストで 93KB→266KB）が、
+# 原本（2.4〜3.9MB）よりは十分小さいままなので許容する。`-l100` 等の画質パラメータは
+# 階層1の実測でほぼ効果が無かったため使わない。
+THUMBNAIL_OVERSAMPLE = 2
+
 LIST_ALBUM_FIELDS = 'nextPageToken,files(id,name,mimeType)'
 LIST_ASSET_FIELDS = ('nextPageToken,files(id,name,mimeType,md5Checksum,modifiedTime,'
                       'imageMediaMetadata(time))')
@@ -301,22 +310,31 @@ class GDriveAPI:
     def _current_fit(self) -> str:
         return normalize_fit(self.settings.get('photo_fit', FIT_CONTAIN))
 
-    def _required_thumbnail_size(self, image_meta: dict[str, Any]) -> tuple[int | None, int | None]:
+    def _target_thumbnail_size(
+        self, image_meta: dict[str, Any]
+    ) -> tuple[int | None, int | None, int | None, int | None]:
         """
-        `thumbnailLink` に付ける `=wW-hH` の W/H を決める。
+        表示に必要な目標寸法（target_w, target_h）と、見た目の向きへ補正した
+        元画像の寸法（orig_w, orig_h）を返す。メタデータが無ければ全て None。
 
         `imageMediaMetadata.width/height` は回転前の値、`rotation` は 90° 単位の
         回数（PoC で確認済み）のため、まず見た目の向きへ入れ替えてから
         `resolve_fit()`（`photo_cache.py` の判定をそのまま再利用する）に渡す。
 
-        contain は画面の寸法をそのまま要求すればよい（Drive 側が回転を適用した
+        contain の目標寸法は画面の寸法そのもの（Drive 側が回転を適用した
         うえでアスペクト比を保って収める）。cover（smart で cover と判定された
-        場合を含む）は、画面を覆うのに必要な寸法まで拡大して要求する
+        場合を含む）は、画面を覆うのに必要な寸法まで拡大したもの
         （その箱に contain で収まる＝片辺がちょうど画面、もう片辺がはみ出す）。
+
+        ここで返す寸法は**オーバーサンプリング前**（＝実際に表示へ必要な寸法）で、
+        `thumbnailLink` へ実際に要求する寸法（`THUMBNAIL_OVERSAMPLE` 倍）とも、
+        「小さすぎるか」の判定基準とも区別する。判定基準を要求寸法にしてしまうと、
+        元画像が目標の2倍に満たない場合に常に「小さすぎる」と誤判定するため
+        （Drive は元画像より大きくは拡大して返さない）。
         """
         width, height = image_meta.get('width'), image_meta.get('height')
         if not width or not height:
-            return None, None
+            return None, None, None, None
         rotation = image_meta.get('rotation') or 0
         if rotation % 2 == 1:
             width, height = height, width
@@ -324,20 +342,34 @@ class GDriveAPI:
         disp_w, disp_h = self._display_size
         fit = resolve_fit(self._current_fit(), (width, height), (disp_w, disp_h))
         if fit != FIT_COVER:
-            return disp_w, disp_h
+            return disp_w, disp_h, width, height
 
         scale = max(disp_w / width, disp_h / height)
-        return max(1, math.ceil(width * scale)), max(1, math.ceil(height * scale))
+        target_w = max(1, math.ceil(width * scale))
+        target_h = max(1, math.ceil(height * scale))
+        return target_w, target_h, width, height
 
-    def _looks_large_enough(self, data: bytes, req_w: int | None, req_h: int | None) -> bool:
+    def _looks_large_enough(self, data: bytes, target_w: int | None, target_h: int | None,
+                            orig_w: int | None, orig_h: int | None) -> bool:
         """
-        取得した画像が要求寸法に対して小さすぎないかを確認する。
+        取得した画像が表示に必要な寸法（`target_w`/`target_h`。オーバーサンプリング
+        前の「表示に必要な寸法」であり、実際に Drive へ要求した寸法ではない）に対して
+        小さすぎないかを確認する。
 
-        片辺だけ小さい（例: 幅は足りるが高さが足りない）場合は許容する。
-        **両辺とも要求の90%未満のときだけ**「小さすぎる」とみなして原本経路へ
-        切り替える（`resize` 系のわずかな丸め誤差を過剰に弾かないため）。
+        **判定基準に要求寸法（target の `THUMBNAIL_OVERSAMPLE` 倍）を使ってはならない。**
+        Drive は元画像より大きくは拡大して返さないため、元画像が目標の2倍に満たない
+        普通の写真では常に「小さすぎる」と誤判定し、原本フォールバックが常時発生してしまう。
+
+        また、元画像の見た目寸法（rotation 補正後）自体が目標以下で、返ってきた
+        寸法がその元画像寸法とほぼ同じなら「小さすぎる」扱いにしない。原本を取っても
+        Drive が返した画素数以上にはならず、フォールバックしても得るものが無いため。
+
+        上記のいずれにも該当しない場合、片辺だけ小さい（例: 幅は足りるが高さが
+        足りない）ケースは許容し、**両辺とも目標の90%未満のときだけ**
+        「小さすぎる」とみなして原本経路へ切り替える（`resize` 系のわずかな
+        丸め誤差を過剰に弾かないため）。
         """
-        if req_w is None or req_h is None:
+        if target_w is None or target_h is None:
             return True
         try:
             with Image.open(BytesIO(data)) as img:
@@ -345,9 +377,14 @@ class GDriveAPI:
         except (UnidentifiedImageError, OSError) as e:
             logger.warning('thumbnailLink の画像を開けませんでした: %s', e)
             return False
-        if w < req_w * 0.9 and h < req_h * 0.9:
-            logger.info('thumbnailLink の寸法が要求より小さすぎるため原本へ切り替えます: '
-                       'got=%dx%d requested=%dx%d', w, h, req_w, req_h)
+
+        if orig_w and orig_h and orig_w <= target_w and orig_h <= target_h:
+            if w >= orig_w * 0.9 and h >= orig_h * 0.9:
+                return True
+
+        if w < target_w * 0.9 and h < target_h * 0.9:
+            logger.info('thumbnailLink の寸法が目標より小さすぎるため原本へ切り替えます: '
+                       'got=%dx%d target=%dx%d', w, h, target_w, target_h)
             return False
         return True
 
@@ -489,7 +526,11 @@ class GDriveAPI:
         # （photo_cache.py の `_encode_jpeg()` は `delivers_originals=True` の取得元に
         # 対して常に exif_transpose を試みる契約のため）。
         if thumb_link:
-            req_w, req_h = self._required_thumbnail_size(image_meta)
+            target_w, target_h, orig_w, orig_h = self._target_thumbnail_size(image_meta)
+            if target_w is not None and target_h is not None:
+                req_w, req_h = target_w * THUMBNAIL_OVERSAMPLE, target_h * THUMBNAIL_OVERSAMPLE
+            else:
+                req_w, req_h = None, None
             base = thumb_link.rsplit('=', 1)[0] if '=' in thumb_link else thumb_link
             size_spec = f'w{req_w}-h{req_h}' if req_w and req_h else 's2048'
             url = f'{base}={size_spec}'
@@ -501,7 +542,7 @@ class GDriveAPI:
                 resp = None
             if resp is not None:
                 if resp.status_code == 200 and resp.content:
-                    if self._looks_large_enough(resp.content, req_w, req_h):
+                    if self._looks_large_enough(resp.content, target_w, target_h, orig_w, orig_h):
                         return resp.content
                 else:
                     logger.warning('thumbnailLink が %d を返しました: host=%s size=%s',

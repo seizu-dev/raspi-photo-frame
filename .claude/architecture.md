@@ -413,6 +413,16 @@ src/
         返るため、二重回転の恐れがある）。`main.py` / `warm_cache.py` は
         `provider.delivers_originals` を `PhotoCache(..., originals=...)` へ
         そのまま渡す配線を持つ
+    -   `originals` ↔ `_encode_jpeg()` の JPEG 保存設定（`JPEG_QUALITY` /
+        `ORIGINALS_JPEG_QUALITY` + `ORIGINALS_JPEG_SUBSAMPLING`）。**写真本体
+        （`max_size` 指定あり）だけ原本モードで quality=95・4:4:4 へ上げる**
+        （4:2:0 の色差間引きがイラストの線まわりに色にじみを出すため。
+        SPECIFICATION.md 9-11 に PSNR の実測値）。**Immich 側（`originals=False`）
+        の保存設定は変えない**（save() の引数を増やすと既存キャッシュとバイト単位で
+        変わりうるため）。**アルバム表紙（`store_thumbnail()`、`max_size=None`）は
+        `originals=True` でも従来の設定のまま**（表紙は元々小さく、色にじみの実害が
+        小さいため対象外にした）。Immich 側の quality を変えるときは、既存キャッシュ
+        （接尾辞なしのファイル名を共有）との見た目の混在と容量の増加に注意すること
     -   Drive の `thumbnailLink` の要求寸法（`=wW-hH`）↔ `PhotoCache.display_size`
         （`gdrive_api.py` の `set_display_size()` で伝える。provider は
         `PhotoCache` より前に生成されるため、実際の表示解像度が分かるのは
@@ -421,7 +431,13 @@ src/
         別の判定式を複製しない）。**`imageMediaMetadata.width/height` は
         回転前の値、`rotation` は 90° 単位の回数**（PoC 実測）なので、
         `gdrive_api.py` はこの2つを組み合わせて「見た目の向き」を求めてから
-        `resolve_fit()` に渡す契約になっている
+        `resolve_fit()` に渡す契約になっている。**実際に要求する寸法は表示に
+        必要な寸法（`_target_thumbnail_size()`）の `THUMBNAIL_OVERSAMPLE`（2）倍**
+        （階層1の実測で Drive 側の縮小アルゴリズムの画質が低いと分かったため。
+        SPECIFICATION.md 9-11 に実測値）。**「小さすぎるか」の判定
+        （`_looks_large_enough()`）は、この2倍した要求寸法ではなく target（2倍
+        する前）を基準にする**（Drive は元画像より大きくは拡大しないため、
+        要求寸法を基準にすると通常の写真で常に小さすぎる判定になってしまう）
     -   **HEIC/HEIF の原本はデコードしない。** `gdrive_api.py` の
         `ORIGINAL_MIME_ALLOWED`（JPEG/PNG/WebP のみ）↔ `_skipped_originals`
         （一度スキップしたら `files.get` すら呼ばず即座に諦める）。
