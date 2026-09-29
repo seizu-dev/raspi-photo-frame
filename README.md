@@ -103,6 +103,53 @@ Nothing else is used, including `asset.download`. If a permission is missing, Im
 responds with `403` and `Missing required permission: <name>`
 (`tools/verification/immich_probe.py` can help narrow it down).
 
+#### Using Google Drive instead of Immich
+
+Set `PF_PHOTO_PROVIDER=gdrive` in `.env` to read photos from a shared Google Drive
+folder instead of Immich. This uses a service account (SA), not your personal
+Google login.
+
+1. In the Google Cloud console, create (or pick) a project and enable the
+   **Google Drive API**.
+2. Create a **service account** and download its JSON key.
+3. Place the key file where the container can read it, and point
+   `GDRIVE_SA_KEY_FILE` at it (default: `gdrive-service-account.json` inside the
+   config directory, i.e. the same bind-mounted directory as `settings.json`).
+   Keep the permissions tight (`chmod 600`) and make sure it's readable by uid 1000.
+   **Do not commit this file** — `.gitignore` already excludes `/config/*.json`
+   other than the sample settings file.
+4. Share the folder you want to display with the service account's email address
+   (found in the JSON key as `client_email`), with **Viewer** access.
+5. Set `GDRIVE_ROOT_FOLDER_ID` to that folder's ID (the last path segment of its
+   Drive URL).
+
+Folder layout rules:
+
+*   Each subfolder directly under the root is treated as one album.
+*   Photos placed directly in the root (not inside a subfolder) are grouped into a
+    single virtual "Unsorted" album.
+*   Only the immediate contents of a folder are read — nested sub-subfolders and
+    shortcuts are ignored.
+
+Supported formats are JPEG, PNG, WebP, HEIC and HEIF. The app prefers Drive's own
+server-side thumbnail rendering (which also applies EXIF/HEIF rotation and converts
+HEIC to JPEG/PNG), falling back to downloading the original file only for
+JPEG/PNG/WebP when that isn't available. **HEIC/HEIF originals are never decoded
+on-device** — decoding a full-resolution HEIC photo can peak well over the memory
+this device has (measured ~600MB for a 48MP HEIC), so if Drive's thumbnail service
+can't render a given HEIC/HEIF file, it simply won't be shown. The `=wWIDTH-hHEIGHT`
+thumbnail sizing used here is an observed behavior of Drive's thumbnail links, not
+something documented in the official API reference, so it could change.
+
+Google Drive doesn't support a "favorites" source (there's no equivalent concept),
+so only the album and daily-pickup sources are available when using it.
+
+An album's cover thumbnail is the first image in the folder, sorted by name, and
+is refreshed once the cached copy is older than `cache_lifetime_hours` (a setting
+in the settings screen) — unlike Immich, where the cover's identity itself changes
+when you replace it, Drive's cover is always keyed by the folder, so the cache
+needs an age check to notice a new leading photo.
+
 `GID_*` in `.env` holds device group IDs, and **these differ from host to host.**
 Check them on your own machine before filling them in:
 

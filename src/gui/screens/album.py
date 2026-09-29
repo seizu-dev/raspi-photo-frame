@@ -43,8 +43,8 @@ from src.i18n import t
 if TYPE_CHECKING:
     from src.config_manager import ConfigManager
     from src.gui.renderer import Renderer
-    from src.immich_api import ImmichAPI
     from src.photo_cache import PhotoCache
+    from src.photo_provider import PhotoProvider
 
 logger = logging.getLogger(__name__)
 
@@ -284,10 +284,10 @@ class AlbumScreen:
     """
 
     def __init__(self, renderer: 'Renderer', config: 'ConfigManager',
-                 api: 'ImmichAPI', cache: 'PhotoCache') -> None:
+                 provider: 'PhotoProvider', cache: 'PhotoCache') -> None:
         self._r = renderer
         self._config = config
-        self._api = api
+        self._provider = provider
         self._cache = cache
         self._gen = (-1, -1)
 
@@ -309,6 +309,10 @@ class AlbumScreen:
         # 二重にリクエストを積まないための集合。範囲外に出たら discard し、
         # 再度可視範囲に入ったときに取り直せるようにする
         self._requested: set[int] = set()
+        # `provider.album_thumbnail_expires` が True の取得元向け。有効期限切れの表紙を
+        # 取り直し済み（または依頼済み）の index。**`_requested` と違い範囲外に出ても
+        # discard しない**（1訪問につき1回までに抑えるため。on_enter() でだけ空にする）。
+        self._refresh_requested: set[int] = set()
         # 前フレームでラベルのテクスチャを許可していた index の範囲 [start, end)。
         # **アルバム名のテクスチャを解放する対象を求めるために持つ。**
         # サムネイルと違い「要求した index の集合」が無い（描画時に遅延生成される）ため、
@@ -398,19 +402,35 @@ class AlbumScreen:
 
         self._restore_selection()
 
+    def _find_entry_index(self, entry_id: str) -> int | None:
+        """ `id` から仮想エントリの index を探す（entries の並びに依存しないため） """
+        for i, entry in enumerate(self._entries):
+            if entry.get('id') == entry_id:
+                return i
+        return None
+
     def _restore_selection(self) -> None:
-        """ 画面を開いた時点の選択状態を現在の設定（source/album_id）から復元する """
+        """
+        画面を開いた時点の選択状態を現在の設定（source/album_id）から復元する。
+
+        仮想エントリ（お気に入り／デイリーピックアップ）の並びは固定 index では
+        探さない。`provider.supports_favorites` が False の取得元ではお気に入りの
+        仮想エントリ自体が無く（_fetch_albums_worker 参照）、並びが1つ繰り上がるため。
+        """
         source = self._config.get('source')
         album_id = self._config.get('album_id')
 
-        idx = 0  # 既定は先頭（お気に入り）
-        if source == 'daily_pickup':
-            idx = 1
-        elif source == 'album' and album_id:
+        idx = 0  # 既定は先頭
+        if source == 'album' and album_id:
             for i, entry in enumerate(self._entries):
                 if not entry.get('is_virtual') and entry.get('id') == album_id:
                     idx = i
                     break
+        else:
+            target_id = 'daily_pickup' if source == 'daily_pickup' else 'favorites'
+            found = self._find_entry_index(target_id)
+            if found is not None:
+                idx = found
         self._select(idx)
 
     def _select(self, index: int) -> None:
@@ -440,6 +460,7 @@ class AlbumScreen:
         self._selected_index = None
         self._textures.clear()
         self._requested.clear()
+        self._refresh_requested.clear()
         self._label_range = (0, 0)
         self._drain(self._list_queue)
         self._drain(self._thumb_request_queue)
@@ -478,6 +499,7 @@ class AlbumScreen:
         self._threads.clear()
         self._textures.clear()
         self._requested.clear()
+        self._refresh_requested.clear()
         self._label_range = (0, 0)
         for cell in self._cells:
             cell.texture = None
@@ -593,23 +615,34 @@ class AlbumScreen:
         読み直さない（それらは次の on_enter() で別の値に差し替わりうるため。
         __init__ のコメント参照）。
 
-        `ImmichAPI.fetch_albums()` は通信エラーを内部で握って空リストを返す
-        契約になっている（0件は「壊れている」とは限らない、が正常系の切り分けが
-        できない）。そのため、**通信が失敗した可能性がある空リストのときは
-        古いサムネイルキャッシュを消さない**（本来のアルバムがまだ存在するのに、
-        一時的な通信エラーで「存在しない」と誤判定してキャッシュを全消しする
-        事故を避けるための保守的な判断）。
+        `provider.fetch_albums()`（Immich では通信エラーを内部で握って空リストを
+        返す契約）は原則として例外を投げない設計だが、**取得元によらず**
+        スレッドを確実に生かし続けるため念のため丸ごと握る（ワーカーの全例外を
+        握る方針。.claude/plans/abundant-weaving-kernighan.md PR1）。0件は
+        「壊れている」とは限らないため、通信が失敗した可能性がある空リストの
+        ときは**古いサムネイルキャッシュを消さない**（本来のアルバムがまだ
+        存在するのに、一時的な通信エラーで「存在しない」と誤判定してキャッシュを
+        全消しする事故を避けるための保守的な判断）。
         """
         if stop_event.is_set():
             return
-        albums = self._api.fetch_albums()
+        try:
+            albums = self._provider.fetch_albums()
+        except Exception:
+            logger.exception('アルバム一覧の取得中に例外が発生しました')
+            albums = []
         if stop_event.is_set():
             return
 
         if albums:
             self._cache.cleanup_thumbnails(albums)
 
-        entries = list(_VIRTUAL_ENTRIES) + albums
+        # provider がお気に入りに対応していなければ、その仮想エントリ自体を
+        # 出さない（reconcile_settings() は起動時の source を寄せるだけで、
+        # 画面上の選択肢からも隠す必要があるのは別の話のため）
+        virtual_entries = [e for e in _VIRTUAL_ENTRIES
+                           if e['id'] != 'favorites' or self._provider.supports_favorites]
+        entries = list(virtual_entries) + albums
         if not stop_event.is_set():
             self._list_queue.put((session, entries))
 
@@ -642,28 +675,49 @@ class AlbumScreen:
         帯域を使い切らないため）。
 
         `session`/`stop_event` の扱いは `_fetch_albums_worker` と同じ
-        （引数で固定し、動的に読み直さない）。
+        （引数で固定し、動的に読み直さない）。**1件ごとの例外でスレッド自体を
+        死なせない**（握らずに死ぬと、以降このスレッドへ積まれるリクエストが
+        永久に処理されなくなる。ワーカーの全例外を握る方針）。
+
+        `force` は `provider.album_thumbnail_expires`（`_request_stale_refresh()`）
+        から積まれた取り直し依頼のときに True になる。True のときはディスク
+        キャッシュを見ずに必ず `fetch_album_thumbnail()` を呼び直す（キャッシュを
+        見てしまうと、有効期限切れと判定したまさにその古いファイルを再び
+        返してしまい取り直しにならないため）。
         """
         while not stop_event.is_set():
             try:
-                req_session, index, album_id, thumb_id = self._thumb_request_queue.get(timeout=0.2)
+                req_session, index, entry, force = self._thumb_request_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
 
-            path = self._cache.get_thumbnail_path(album_id, thumb_id)
-            if path is None:
-                raw = self._api.download_asset(thumb_id, size='thumbnail')
-                if raw is not None:
-                    path = self._cache.store_thumbnail(album_id, thumb_id, raw)
+            try:
+                album_id = entry.get('id')
+                thumb_id = entry.get('albumThumbnailAssetId')
+                path = None if force else self._cache.get_thumbnail_path(album_id, thumb_id)
+                if path is None:
+                    raw = self._provider.fetch_album_thumbnail(entry)
+                    if raw is not None:
+                        path = self._cache.store_thumbnail(album_id, thumb_id, raw)
+            except Exception:
+                logger.exception('アルバムサムネイルの取得中に例外が発生しました: index=%d', index)
+                path = None
 
             if not stop_event.is_set():
-                self._thumb_result_queue.put((req_session, index, path))
+                self._thumb_result_queue.put((req_session, index, path, force))
 
     def _collect_thumbnails(self) -> None:
-        """ ワーカーの結果を取り込んでテクスチャ化する（メインスレッド限定） """
+        """
+        ワーカーの結果を取り込んでテクスチャ化する（メインスレッド限定）。
+
+        取り直し（`force=True`）が失敗した場合（`path is None`）は**何もせず
+        continue する**。`self._cells[index].texture` を書き換えないため、
+        今表示している古い表紙がそのまま残る（要件どおり「失敗したら古い表紙を
+        出し続ける」）。
+        """
         while True:
             try:
-                session, index, path = self._thumb_result_queue.get_nowait()
+                session, index, path, force = self._thumb_result_queue.get_nowait()
             except queue.Empty:
                 return
 
@@ -676,9 +730,16 @@ class AlbumScreen:
                 continue
             if index not in self._requested:
                 # 取得中に範囲外へ出て破棄済み。今さら足しても表示されないので捨てる
+                # （取り直し依頼も `_request_stale_refresh()` が「既にテクスチャを
+                # 持っている＝_requested に居る」ことを前提に積むため、この判定で
+                # force/非force のどちらも正しく扱える）。
                 continue
             if path is None:
-                logger.warning('アルバムサムネイルを取得できませんでした: index=%d', index)
+                if force:
+                    logger.warning('アルバムサムネイルの取り直しに失敗しました（既存の表紙を維持します）: index=%d',
+                                   index)
+                else:
+                    logger.warning('アルバムサムネイルを取得できませんでした: index=%d', index)
                 continue
 
             texture = self._r.texture_from_image(path)
@@ -717,6 +778,8 @@ class AlbumScreen:
         - 範囲外に出たセルのアルバム名テクスチャも `release_labels()` で手放す。
           **これが無いと一度でも描かれたセルの分が全て残り、アルバム数に比例して
           積み上がる**（600件で1,177本を実機で実測した）
+        - `provider.album_thumbnail_expires` が True の取得元では、可視範囲の
+          表紙のうち有効期限切れのものへ取り直しを依頼する（`_request_stale_refresh()`）
         """
         start, end = self._visible_index_range()
 
@@ -727,8 +790,10 @@ class AlbumScreen:
             if entry.get('is_virtual') or not entry.get('albumThumbnailAssetId'):
                 continue
             self._requested.add(index)
-            self._thumb_request_queue.put(
-                (self._session, index, entry['id'], entry['albumThumbnailAssetId']))
+            self._thumb_request_queue.put((self._session, index, entry, False))
+
+        if self._provider.album_thumbnail_expires:
+            self._request_stale_refresh(start, end)
 
         for index in list(self._requested):
             if start <= index < end:
@@ -750,6 +815,41 @@ class AlbumScreen:
                 continue
             self._cells[index].release_labels()
         self._label_range = (label_start, label_end)
+
+    def _request_stale_refresh(self, start: int, end: int) -> None:
+        """
+        `provider.album_thumbnail_expires` が True の取得元向け。
+
+        Drive のようにフォルダの表紙が固定キー（`albumThumbnailAssetId='cover'`）で
+        表される取得元では、フォルダの先頭画像が入れ替わっても `PhotoCache` の
+        キャッシュキーが変わらないため、Immich（キーが変わって自然に作り直される）と
+        違って古い表紙がいつまでも表示され続ける。ここで `cache_lifetime_hours` を
+        過ぎたものだけ取り直しを依頼する。
+
+        - **今の表紙をまだ表示できていない index（`self._textures` に無い）は
+          対象にしない。** 初回取得は通常の経路（`_sync_visible_cells()` の
+          force=False 分岐）に任せる。ここで force=True の依頼を重ねて積むと、
+          まだ何も表示できていないのに2本のリクエストが競合する
+        - **`self._refresh_requested` に一度入れたら、可視範囲を出入りしても
+          discard しない。** 1訪問（on_enter〜on_leave）につき同じセルへ
+          何度も依頼しないための唯一の歯止め（`_requested` と違い範囲に応じて
+          動かさない）
+        - 今の表紙は消さない。取り直しの成否は `_collect_thumbnails()` 側が扱う
+          （成功したら差し替え、失敗したら何もしない＝古い表紙が残る）
+        """
+        max_age_hours = self._config.get('cache_lifetime_hours', 24)
+        for index in range(start, end):
+            if index in self._refresh_requested or index not in self._textures:
+                continue
+            entry = self._entries[index]
+            if entry.get('is_virtual') or not entry.get('albumThumbnailAssetId'):
+                continue
+            album_id = entry.get('id')
+            thumb_id = entry.get('albumThumbnailAssetId')
+            if not self._cache.is_thumbnail_stale(album_id, thumb_id, max_age_hours):
+                continue
+            self._refresh_requested.add(index)
+            self._thumb_request_queue.put((self._session, index, entry, True))
 
     # ------------------------------------------------------- SDL 再生成への追従
 

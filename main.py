@@ -45,9 +45,9 @@ from src.gui.screens.settings import SettingsScreen  # noqa: E402
 from src.gui.screens.slideshow import SlideshowScreen  # noqa: E402
 from src import i18n  # noqa: E402
 from src.i18n import t  # noqa: E402
-from src.immich_api import ImmichAPI  # noqa: E402
 from src.motion_sensor import MotionSensor  # noqa: E402
 from src.photo_cache import PhotoCache  # noqa: E402
+from src.photo_provider import PhotoProvider, create_provider, reconcile_settings  # noqa: E402
 from src.photo_source import PhotoSource  # noqa: E402
 from src import power_schedule  # noqa: E402
 from src.touch_watcher import TouchWatcher  # noqa: E402
@@ -103,19 +103,40 @@ class App:
         self._renderer.create()
         self._overlay = Overlay(self._renderer, self._config)
 
-        self._cache = PhotoCache(self._config, display_size=self._renderer.size)
+        # provider をキャッシュより先に生成する。PhotoCache のディレクトリ構成
+        # （名前空間分け）が provider.cache_namespace に依存するため
+        # （.claude/architecture.md「対で更新が必要な箇所」参照）。
+        self._provider: PhotoProvider | None = None
+        self._source: PhotoSource | None = None
+        try:
+            self._provider = create_provider(self._config, status_callback=self._overlay.set_status)
+            reconcile_settings(self._config, self._provider)
+            logger.info('写真取得元: %s', self._provider.name)
+        except ValueError as e:
+            # 資格情報が無い／未実装の取得元が指定された場合でも起動はする。
+            # 設定を直せば再試行で拾える
+            logger.error('写真取得元に接続できません: %s', e)
+            self._overlay.set_status(t('status.no_provider'))
+
+        # provider が生成できなかった場合は名前空間なし（Immich と同じ既定）で
+        # キャッシュを用意する。写真は表示できないため実害は無い
+        namespace = self._provider.cache_namespace if self._provider is not None else ''
+        delivers_originals = self._provider.delivers_originals if self._provider is not None else False
+        self._cache = PhotoCache(self._config, display_size=self._renderer.size, namespace=namespace,
+                                 originals=delivers_originals)
+        if self._provider is not None:
+            # provider は PhotoCache より先に生成するため、実際の表示解像度
+            # （renderer.size）はこの時点で初めて分かる。thumbnailLink の要求寸法の
+            # 計算に使うため、対応する provider（Drive）にだけ渡す
+            # （`set_display_size` を持たない provider は無視してよい任意メソッド）。
+            set_display_size = getattr(self._provider, 'set_display_size', None)
+            if callable(set_display_size):
+                set_display_size(self._renderer.size)
         # 起動時に一度だけ上限を強制する（保存 N 回ごとの間引きとは別に）
         self._cache.enforce_limit(force=True)
 
-        self._api: ImmichAPI | None = None
-        self._source: PhotoSource | None = None
-        try:
-            self._api = ImmichAPI(self._config, status_callback=self._overlay.set_status)
-            self._source = PhotoSource(self._config, self._api, self._cache)
-        except ValueError as e:
-            # 資格情報が無くても起動はする。設定を直せば再試行で拾える
-            logger.error('Immich に接続できません: %s', e)
-            self._overlay.set_status(t('status.no_immich'))
+        if self._provider is not None:
+            self._source = PhotoSource(self._config, self._provider, self._cache)
 
         self._slideshow = SlideshowScreen(self._renderer, self._overlay,
                                           self._config, self._source) if self._source else None
@@ -128,10 +149,10 @@ class App:
         self._menu_screen = MenuScreen(self._renderer)
         self._settings_screen = SettingsScreen(self._renderer, self._config,
                                                on_changed=self._on_setting_changed)
-        # アルバム選択には Immich API が要る。資格情報が無ければ作らず、
+        # アルバム選択には写真取得元が要る。生成できなければ作らず、
         # ACTION_ALBUM のディスパッチ側でステータス表示にフォールバックする
-        self._album_screen = (AlbumScreen(self._renderer, self._config, self._api, self._cache)
-                              if self._api is not None else None)
+        self._album_screen = (AlbumScreen(self._renderer, self._config, self._provider, self._cache)
+                              if self._provider is not None else None)
         self._screens: list = [self._slideshow] if self._slideshow is not None else []
 
         # 消灯時は SDL を破棄して DRM master を解放する。順序は DisplayManager が保証する
@@ -347,7 +368,17 @@ class App:
         token = self._list_request_token
 
         def worker() -> None:
-            self._list_queue.put((token, self._source.load_list(force=force)))
+            try:
+                photos = self._source.load_list(force=force)
+            except Exception:
+                # ここで例外を握らないとスレッドが黙って死に、_list_queue に何も
+                # 積まれないまま「写真情報を取得しています...」の表示で固まる。
+                # 空リストとして扱えば _collect_photo_list() 経由で既存の
+                # 「写真が見つからない」→ RETRY_INTERVAL_SEC 後に再試行、という
+                # 正常系のリトライ経路にそのまま乗る
+                logger.exception('写真リストの取得中に例外が発生しました（token=%d）', token)
+                photos = []
+            self._list_queue.put((token, photos))
 
         threading.Thread(target=worker, name='photo-list', daemon=True).start()
         self._overlay.set_status(t('status.loading_photos'))
@@ -421,7 +452,7 @@ class App:
             if self._album_screen is not None:
                 self._push_screen(self._album_screen)
             else:
-                self._overlay.set_status(t('status.album_needs_immich'))
+                self._overlay.set_status(t('status.album_needs_provider'))
         elif action == ACTION_QUIT:
             logger.info('メニューから終了が要求されました')
             self._should_stop = True

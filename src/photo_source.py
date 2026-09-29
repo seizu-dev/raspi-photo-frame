@@ -4,25 +4,34 @@ from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from src.daily_pickup_manager import DailyPickupManager
+from src.photo_provider import ProviderError
+
 if TYPE_CHECKING:
     from src.config_manager import ConfigManager
-    from src.immich_api import ImmichAPI
     from src.photo_cache import PhotoCache
+    from src.photo_provider import PhotoProvider
 
 logger = logging.getLogger(__name__)
 
 
 class PhotoSource:
     """
-    Immich API とディスクキャッシュを繋ぐ層
+    写真取得元（provider）とディスクキャッシュを繋ぐ層
 
-    GUI からネットワークとキャッシュの使い分けを見えなくする。
+    GUI から取得元の種類とネットワーク／キャッシュの使い分けを見えなくする。
     ネットワーク断はキャッシュへフォールバックする正常系として扱う。
+
+    favorites/album/daily_pickup の振り分けは元々 `ImmichAPI.fetch_assets_info()`
+    にあったが、取得元を抽象化する際にここへ移した
+    （.claude/plans/abundant-weaving-kernighan.md PR1）。`provider` は
+    `PhotoProvider` Protocol を満たす任意の取得元（PR1 時点では `ImmichAPI` のみ）。
     """
 
-    def __init__(self, config: 'ConfigManager', api: 'ImmichAPI', cache: 'PhotoCache') -> None:
+    def __init__(self, config: 'ConfigManager', provider: 'PhotoProvider',
+                 cache: 'PhotoCache') -> None:
         self.config = config
-        self.api = api
+        self.provider = provider
         self.cache = cache
 
     def cache_key(self) -> str:
@@ -39,10 +48,10 @@ class PhotoSource:
         写真リストを取得する。
 
         1. キャッシュが生きていればそれを使う（force=True なら飛ばす）
-        2. API を叩き、取れたらキャッシュへ保存する
-        3. API が空を返したら、失効したキャッシュでも使う（通信断での表示継続）
+        2. provider を叩き、取れたらキャッシュへ保存する
+        3. provider が空を返したら、失効したキャッシュでも使う（通信断での表示継続）
 
-        display_mode == 'random' のシャッフルはここで行う。immich_api からは
+        display_mode == 'random' のシャッフルはここで行う。provider からは
         表示ポリシーとして意図的に外してある。
         """
         key = self.cache_key()
@@ -60,7 +69,7 @@ class PhotoSource:
                 logger.info('写真リストをキャッシュから読み込みました: %s (%d 件)', key, len(cached))
                 return self._ordered(cached)
 
-        assets = self.api.fetch_assets_info()
+        assets = self._fetch_assets_info()
         if assets:
             self.cache.store_asset_list(key, assets)
             return self._ordered(assets)
@@ -81,6 +90,91 @@ class PhotoSource:
             random.shuffle(result)
         return result
 
+    # ---------------------------------------------------------- アセット情報の取得
+
+    def _update_status(self, message: str) -> None:
+        """
+        provider の `update_status()`（ログ＋オーバーレイ通知）があれば委譲する。
+
+        `PhotoProvider` Protocol はこのメソッドを必須にしていない（すべての
+        取得元がステータス通知を持つとは限らないため）ので、無い場合はログにだけ残す。
+        """
+        update_status = getattr(self.provider, 'update_status', None)
+        if callable(update_status):
+            update_status(message)
+        else:
+            logger.info(message)
+
+    def _fetch_assets_info(self) -> list[dict[str, Any]]:
+        """
+        設定された取得元に応じて、表示する写真のアセット情報リストを取得する。
+
+        キャッシュ判定は行わず常に provider を叩く。通信エラーはキャッシュへ
+        フォールバックする正常系として扱うため、`ProviderError` は空リストに変換する。
+        表示順のシャッフル（display_mode == 'random'）は `_ordered()` の責務なので
+        ここでは行わない（元 `ImmichAPI.fetch_assets_info()` から移植。文言は変えていない）。
+        """
+        source = self.config.get('source')
+        try:
+            if source == 'daily_pickup':
+                assets_info = self._fetch_daily_pickup_assets_info()
+            elif source == 'album':
+                assets_info = self._fetch_album_assets_info(self.config.get('album_id'))
+            elif self.provider.supports_favorites:
+                assets_info = self.provider.fetch_favorite_assets()
+            else:
+                # reconcile_settings() が起動時に daily_pickup へ寄せるため通常は
+                # 通らないが、settings.json を手で書き換えた場合の保険として残す
+                assets_info = []
+        except ProviderError as e:
+            self._update_status(f'API接続エラー: {e}')
+            return []
+
+        if not assets_info:
+            self._update_status('写真が見つかりませんでした。設定を確認してください。')
+            return []
+
+        self._update_status(f'写真情報を {len(assets_info)} 件取得しました。')
+        return assets_info
+
+    def _fetch_album_assets_info(self, album_id: str | None) -> list[dict[str, Any]]:
+        """ 指定アルバムのアセット情報を取得する """
+        if not album_id:
+            return []
+        return self.provider.fetch_album_assets(album_id)
+
+    def _fetch_daily_pickup_assets_info(self) -> list[dict[str, Any]]:
+        """ デイリーピックアップ用のアセット情報を取得する """
+        all_albums = self.provider.fetch_albums()
+        if not all_albums:
+            return []
+
+        all_album_ids = [a['id'] for a in all_albums]
+        album_name_map = {a['id']: a['albumName'] for a in all_albums}
+
+        pickup_mgr = DailyPickupManager(self.config)
+        selected_album_ids = pickup_mgr.get_today_album_ids(all_album_ids)
+        logger.info('デイリーピックアップ対象: %s',
+                    [album_name_map.get(aid, aid) for aid in selected_album_ids])
+
+        assets_info: list[dict[str, Any]] = []
+        for album_id in selected_album_ids:
+            album_name = album_name_map.get(album_id, '')
+            try:
+                # 旧実装（移植元）はデイリーピックアップでアルバムの並び順設定を
+                # 参照していなかった（単一アルバム選択のみが反映する挙動だった）。
+                # 複数アルバムを混ぜて表示する以上ここでの並び順の意味は薄く、
+                # 反映すると asc のアルバムだけ逆順になる回帰を招くため据え置く
+                items = self.provider.fetch_album_assets(album_id, album_name,
+                                                          apply_album_order=False)
+            except ProviderError as e:
+                # 1つのアルバムが取れなくても残りは表示したいので、ここだけは継続する
+                self._update_status(f'アルバム取得エラー (ID: {album_id}): {e}')
+                continue
+            assets_info.extend(items)
+
+        return assets_info
+
     def ensure_photo(self, asset_id: str) -> Path | None:
         """
         表示解像度で確定済みの写真をディスクに用意し、そのパスを返す。
@@ -92,7 +186,7 @@ class PhotoSource:
         if path is not None:
             return path
 
-        raw = self.api.download_asset(asset_id, size='preview')
+        raw = self.provider.fetch_photo(asset_id)
         if raw is None:
             return None
         return self.cache.store_photo(asset_id, raw)

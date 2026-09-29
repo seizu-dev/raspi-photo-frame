@@ -45,8 +45,8 @@ logger = logging.getLogger('warm_cache')
 # main.py と同様、import 前に SDL 関連の環境変数へは一切触れない
 # （このスクリプトは pygame を import しないため不要）
 from src.config_manager import ConfigManager  # noqa: E402
-from src.immich_api import ImmichAPI  # noqa: E402
 from src.photo_cache import DEFAULT_DISPLAY_SIZE, PhotoCache  # noqa: E402
+from src.photo_provider import create_provider  # noqa: E402
 from src.photo_source import PhotoSource  # noqa: E402
 
 # 進捗ログを出す間隔（枚数）
@@ -90,15 +90,27 @@ def main() -> int:
         logger.info('--display-size 未指定のため既定値を使います: %dx%d', *display_size)
     else:
         logger.info('指定された解像度でキャッシュを焼きます: %dx%d', *display_size)
-    cache = PhotoCache(config, display_size=display_size)
 
     try:
-        api = ImmichAPI(config)
+        provider = create_provider(config)
     except ValueError as e:
-        logger.error('Immich に接続できません: %s', e)
+        logger.error('写真取得元に接続できません: %s', e)
         return 1
+    logger.info('写真取得元: %s', provider.name)
 
-    source = PhotoSource(config, api, cache)
+    # main.py と同様、実際にキャッシュを焼くサイズ（--display-size / 既定値）を
+    # provider に伝える。thumbnailLink の要求寸法の計算に使う（Drive のみ。
+    # 持たない provider には無視してよい任意メソッド）
+    set_display_size = getattr(provider, 'set_display_size', None)
+    if callable(set_display_size):
+        set_display_size(display_size)
+
+    # namespace は provider ごとにキャッシュのサブディレクトリを分けるための識別子
+    # （Immich は空文字で従来どおりの直下配置。.claude/architecture.md
+    # 「対で更新が必要な箇所」参照）
+    cache = PhotoCache(config, display_size=display_size, namespace=provider.cache_namespace,
+                       originals=provider.delivers_originals)
+    source = PhotoSource(config, provider, cache)
 
     logger.info('写真リストを取得します: source=%s album_id=%s',
                 config.get('source'), config.get('album_id'))

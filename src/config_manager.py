@@ -92,6 +92,13 @@ class ConfigManager:
             "daily_pickup_date": "",
             "daily_pickup_selected_ids": [],
             "daily_pickup_remaining_ids": [],
+            # 写真取得元の抽象化（PR1）で追加した実行時状態。画面のウィジェットは持たない
+            # （daily_pickup_date と同じ扱い）。前回起動時の provider.name
+            # （'immich'|'gdrive' 等）を記録し、起動時に reconcile_settings() が
+            # 取得元の切り替わりを検知して album_id 等をリセットする根拠に使う。
+            # 既定は空文字で、空文字 -> 'immich' への遷移では何も初期化しない
+            # （アップデートのたびに実機の設定が消えるのを防ぐため）。
+            "active_provider": "",
         }
         self.settings: dict[str, Any] = self._load()
 

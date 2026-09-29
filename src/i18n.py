@@ -358,9 +358,16 @@ _TEXTS: dict[str, dict[str, str]] = {
     'album.loading': {'ja': 'アルバムを読み込み中...', 'en': 'Loading albums...'},
     'album.favorites': {'ja': 'お気に入り', 'en': 'Favorites'},
     'album.daily_pickup': {'ja': 'デイリーピックアップ', 'en': 'Daily Pickup'},
+    # Google Drive のルートフォルダ直下に直接置かれた写真（サブフォルダに
+    # 分類されていないもの）をまとめる仮想アルバムの表示名（src/gdrive_api.py）。
+    'album.gdrive_root': {'ja': '未分類', 'en': 'Unsorted'},
 
     # --- ステータス（main.py の set_status()） -----------------------------
-    'status.no_immich': {'ja': 'Immich の設定がありません', 'en': 'Immich is not configured'},
+    # 取得元に依存しない文言にしてある（PR1 で Immich 以外の取得元も選べるように
+    # なったため。.claude/plans/abundant-weaving-kernighan.md PR1）。
+    'status.no_provider': {
+        'ja': '写真取得元の設定がありません', 'en': 'Photo provider is not configured',
+    },
     'status.loading_photos': {
         'ja': '写真情報を取得しています...', 'en': 'Loading photo information...',
     },
@@ -372,9 +379,9 @@ _TEXTS: dict[str, dict[str, str]] = {
         'ja': '表示できる写真がありません。{seconds}秒後に再試行します。',
         'en': 'No photos to show. Retrying in {seconds} seconds.',
     },
-    'status.album_needs_immich': {
-        'ja': 'アルバム選択にはImmichの設定が必要です',
-        'en': 'Album selection requires Immich to be configured',
+    'status.album_needs_provider': {
+        'ja': 'アルバム選択には写真取得元の設定が必要です',
+        'en': 'Album selection requires a photo provider to be configured',
     },
 
     # --- Spinner の選択肢（内部値は変えず、表示名だけ翻訳する） ------------------

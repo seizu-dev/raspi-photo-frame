@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import requests
 
 from src.daily_pickup_manager import DailyPickupManager
+from src.photo_provider import ProviderError
 
 if TYPE_CHECKING:
     from src.config_manager import ConfigManager
@@ -37,6 +38,17 @@ class ImmichAPI:
         self.headers = {'x-api-key': self.api_key, 'Accept': 'application/json'}
         self.settings = settings_manager
         self._status_callback = status_callback
+
+        # PhotoProvider Protocol を満たすための属性（src/photo_provider.py）。
+        # Immich は既存キャッシュを温存するため cache_namespace は空文字にする
+        # （PhotoCache は空文字を「名前空間なし＝従来どおりの直下配置」として扱う）。
+        self.name = 'immich'
+        self.cache_namespace = ''
+        self.supports_favorites = True
+        self.delivers_originals = False
+        # Immich は表紙を差し替えると albumThumbnailAssetId 自体が変わるため、
+        # 期限切れによる作り直しは不要（photo_provider.py の Protocol docstring参照）。
+        self.album_thumbnail_expires = False
 
     def update_status(self, message: str) -> None:
         """ 進捗を通知する。コールバック未指定でも実機の調査手段としてログには必ず残す """
@@ -85,6 +97,18 @@ class ImmichAPI:
 
     def _fetch_album_assets_info(self, album_id: str | None) -> list[dict[str, Any]]:
         """ 指定アルバムのアセット情報を取得する。アルバムのソート順を反映する """
+        return self._fetch_album_assets_raw(album_id, apply_album_order=True)
+
+    def _fetch_album_assets_raw(self, album_id: str | None,
+                                apply_album_order: bool) -> list[dict[str, Any]]:
+        """
+        指定アルバムのアセット情報を取得する内部実装。
+
+        `apply_album_order` はアルバムの `order`（'asc'/'desc'）を反映するかどうか。
+        単一アルバム選択（`_fetch_album_assets_info`）では反映するが、デイリーピックアップは
+        旧実装（移植元）がアルバムの `order` を一切見ていなかったため、その挙動を
+        崩さないよう `PhotoSource` から False で呼ばれる（`fetch_album_assets()` を参照）。
+        """
         if not album_id:
             return []
 
@@ -95,7 +119,7 @@ class ImmichAPI:
 
         assets_info = [self._to_asset_info(item) for item in items]
         # API は常に降順(desc)で返される前提。'asc' のときのみ反転する
-        if album_response.get('order', 'desc') == 'asc':
+        if apply_album_order and album_response.get('order', 'desc') == 'asc':
             assets_info.reverse()
         return assets_info
 
@@ -164,6 +188,51 @@ class ImmichAPI:
         # ID で重複排除してマージ
         seen_ids = {a['id'] for a in own_albums}
         return own_albums + [a for a in shared_albums if a['id'] not in seen_ids]
+
+    # ------------------------------------------------------ PhotoProvider Protocol
+
+    def fetch_album_assets(self, album_id: str, album_name: str = '',
+                           apply_album_order: bool = True) -> list[dict[str, Any]]:
+        """
+        PhotoProvider Protocol 用の窓口。`_fetch_album_assets_raw` を呼び、
+        `requests` の例外は `ProviderError` に変換する（呼び出し側の
+        `photo_source.py` が取得元の実装に依存せずに済むようにするため）。
+
+        `album_name` を渡すと各アセットへ付与する。デイリーピックアップのように
+        複数アルバムを混ぜて表示する場合、説明文の `[アルバム名]` に使われる。
+        単一アルバム選択（source == 'album'）では渡さない（従来どおり
+        `config.get('album_name')` にフォールバックする）。
+
+        `apply_album_order` は既定で True（単一アルバム選択の従来どおりの挙動）。
+        デイリーピックアップ（`photo_source.py` の `_fetch_daily_pickup_assets_info`）は
+        旧実装がアルバムの `order` を見ていなかったため、False を渡して反転しない。
+        """
+        try:
+            items = self._fetch_album_assets_raw(album_id, apply_album_order=apply_album_order)
+        except requests.exceptions.RequestException as e:
+            raise ProviderError(str(e)) from e
+        if album_name:
+            for item in items:
+                item['album_name'] = album_name
+        return items
+
+    def fetch_favorite_assets(self) -> list[dict[str, Any]]:
+        """ PhotoProvider Protocol 用の窓口。既存の `_fetch_favorite_assets_info` を呼ぶ """
+        try:
+            return self._fetch_favorite_assets_info()
+        except requests.exceptions.RequestException as e:
+            raise ProviderError(str(e)) from e
+
+    def fetch_photo(self, asset_id: str) -> bytes | None:
+        """ PhotoProvider Protocol 用の窓口。表示用の preview サイズをそのまま返す """
+        return self.download_asset(asset_id, size='preview')
+
+    def fetch_album_thumbnail(self, album: dict[str, Any]) -> bytes | None:
+        """ PhotoProvider Protocol 用の窓口。アルバムのサムネイル用アセットを取得する """
+        thumb_id = album.get('albumThumbnailAssetId')
+        if not thumb_id:
+            return None
+        return self.download_asset(thumb_id, size='thumbnail')
 
     def download_asset(self, asset_id: str, size: str = 'preview',
                        timeout: int = DEFAULT_TIMEOUT) -> bytes | None:

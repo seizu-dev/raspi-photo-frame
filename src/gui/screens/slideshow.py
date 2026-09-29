@@ -349,7 +349,16 @@ class SlideshowScreen:
         self._preloading_index = index
 
         def worker() -> None:
-            path = self._source.ensure_photo(asset_id)
+            try:
+                path = self._source.ensure_photo(asset_id)
+            except Exception:
+                # 例外でスレッドが死ぬと _preload_queue に何も積まれず、
+                # _preloading_index がこの index に固定されたまま先読みが
+                # 二度と進まなくなる。既存の「取得失敗（path=None）」と
+                # 同じ経路に合流させ、_collect_preloaded() の既存の
+                # 復旧処理（as_current の場合は次の写真へ進める）に任せる
+                logger.exception('写真の先読み中に例外が発生しました: index=%d', index)
+                path = None
             if self._stop_event.is_set():
                 return
             self._preload_queue.put((index, as_current, path))
