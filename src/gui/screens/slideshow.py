@@ -52,6 +52,11 @@ class SlideshowScreen:
         self._current_tex = None
         self._next_path: Path | None = None
         self._next_tex = None
+        # _next_tex が実際に持っている写真の index。_next_candidate とは別に持つ。
+        # reload_current() 中に先読みの失敗で候補が進み、その後 as_current の結果が
+        # 届いて候補が _index + 1 に戻ると、候補と next_tex の中身がずれる。
+        # 送りは候補ではなくこの値へ進めて、表示とカウンタを必ず一致させる
+        self._next_loaded_index: int | None = None
         self._gen = -1
 
         self._fading = False
@@ -72,6 +77,15 @@ class SlideshowScreen:
 
         self._preload_queue: queue.Queue = queue.Queue()
         self._preloading_index: int | None = None
+        # 「次に表示する写真」の index。None のときは _index + 1。
+        # 先読みが失敗（取得不能・画素上限超過など）した写真を飛ばして先へ進めるために
+        # 持つ。固定の _index + 1 のままだと、失敗した index を _preloading_index が
+        # 指し続けて先読みも送りも二度と進まず、永久に同じ写真で止まる
+        self._next_candidate: int | None = None
+        # 候補が一周して現在の写真に戻った（次の写真が1枚も用意できない）状態。
+        # 立っている間は先読みを起こさない（ワーカーの空回りを避ける）。
+        # 次の送りのタイミング（request_next）で下ろして最初からやり直す
+        self._preload_exhausted = False
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
 
@@ -94,6 +108,7 @@ class SlideshowScreen:
         self._current_path = None
         self._next_path = None
         self._preloading_index = None
+        self._reset_next_candidate()
         self._drain_queue()
         self._last_change = time.monotonic()
         if photos:
@@ -188,11 +203,13 @@ class SlideshowScreen:
                 logger.info('次の写真がまだ用意できていません')
             # 自動送りで間に合わなかった場合は先読みを促してタイマーを引き直す
             self._last_change = time.monotonic()
-            self._ensure_preload()
+            self._ensure_preload(restart=True)
             return
 
         self._history.append(self._index)
-        self._index = self._next_index()
+        self._index = (self._next_loaded_index if self._next_loaded_index is not None
+                       else self._next_index())
+        self._reset_next_candidate()
 
         if auto:
             self._begin_fade()
@@ -323,6 +340,7 @@ class SlideshowScreen:
         self._current_path = self._next_path
         self._next_tex = None
         self._next_path = None
+        self._next_loaded_index = None
         self._fading = False
         self._last_change = now
         self._ensure_preload()
@@ -330,12 +348,28 @@ class SlideshowScreen:
     # ------------------------------------------------------------------ 先読み
 
     def _next_index(self) -> int:
+        if self._next_candidate is not None:
+            return self._next_candidate
         return (self._index + 1) % len(self._photos)
 
-    def _ensure_preload(self) -> None:
-        """ 次の1枚だけを先読みする。2枚以上は先読みしない（禁止パターン） """
+    def _reset_next_candidate(self) -> None:
+        """ 候補を _index + 1 へ戻す。_index や次のテクスチャを捨てる操作のたびに呼ぶ """
+        self._next_candidate = None
+        self._preload_exhausted = False
+
+    def _ensure_preload(self, restart: bool = False) -> None:
+        """
+        次の1枚だけを先読みする。2枚以上は先読みしない（禁止パターン）。
+
+        restart は送りのタイミング（request_next）だけが真にする。全部失敗して
+        止まっている状態（_preload_exhausted）は、そこで初めて最初から試し直す。
+        """
         if not self._photos or self._next_tex is not None:
             return
+        if self._preload_exhausted:
+            if not restart:
+                return
+            self._reset_next_candidate()
         target = self._next_index()
         if self._preloading_index == target:
             return
@@ -361,7 +395,7 @@ class SlideshowScreen:
                 path = None
             if self._stop_event.is_set():
                 return
-            self._preload_queue.put((index, as_current, path))
+            self._preload_queue.put((index, as_current, path, asset_id))
 
         thread = threading.Thread(target=worker, name=f'preload-{index}', daemon=True)
         self._threads = [t for t in self._threads if t.is_alive()]
@@ -377,32 +411,79 @@ class SlideshowScreen:
         """
         while True:
             try:
-                index, as_current, path = self._preload_queue.get_nowait()
+                index, as_current, path, asset_id = self._preload_queue.get_nowait()
             except queue.Empty:
                 return
 
+            if not (0 <= index < len(self._photos)
+                    and self._photos[index]['id'] == asset_id):
+                # set_photos() で写真リストが差し替わったあとに、旧リストの
+                # ワーカーから遅れて届いた結果。index が偶然一致しても別の写真なので捨てる
+                # （差し替え時に新しい as_current の読み込みは発行済み）
+                logger.info('旧リストの先読み結果を捨てました: index=%d', index)
+                continue
+
+            if not as_current:
+                # 結果を取り込んだので、この index の先読みはもう飛んでいない。
+                # 戻さないと _ensure_preload() が「同じ index を先読み中」と見て止まる
+                if self._preloading_index == index:
+                    self._preloading_index = None
+                if index != self._next_index():
+                    # 前へ戻るなどで候補が変わったあとに遅れて届いた古い先読み結果。
+                    # 別の写真を「次」にしないよう捨てる
+                    logger.info('古い先読み結果を捨てました: index=%d', index)
+                    continue
+
             if path is None:
                 logger.warning('写真を用意できませんでした: index=%d', index)
-                if as_current:
+                if not as_current:
+                    self._on_next_failed(index)
+                else:
                     # 1枚落ちてもスライドショーは続ける
-                    self._index = (index + 1) % len(self._photos) if self._photos else 0
+                    self._index = (index + 1) % len(self._photos)
+                    self._reset_next_candidate()
                     self._request_load(self._index, as_current=True)
                 continue
 
             texture = self._r.texture_from_image(path)
             if texture is None:
+                if not as_current:
+                    self._on_next_failed(index)
                 continue
 
             if as_current:
                 self._current_tex = texture
                 self._current_path = path
                 self._index = index
+                self._reset_next_candidate()
                 self._last_change = time.monotonic()
                 self._update_overlay()
                 self._ensure_preload()
             else:
                 self._next_tex = texture
                 self._next_path = path
+                self._next_loaded_index = index
+
+    def _on_next_failed(self, index: int) -> None:
+        """
+        「次の写真」の先読みが失敗したとき、その1枚を飛ばして先の写真を先読みし直す
+        （as_current の失敗処理と同じ考え方）。
+
+        届いた結果が現在の候補でなければ（前へ戻る等で古くなった）何もしない。
+        一周して現在の写真へ戻ったら止める。ここで続けると全滅時にワーカーが
+        空回りするため、次の送り（request_next）まで待つ。
+        """
+        if not self._photos or index != self._next_index():
+            return
+        following = (index + 1) % len(self._photos)
+        self._preloading_index = None
+        if following == self._index:
+            self._next_candidate = None
+            self._preload_exhausted = True
+            logger.warning('次に表示できる写真が見つかりませんでした。次の送りで再試行します')
+            return
+        self._next_candidate = following
+        self._request_load(following, as_current=False)
 
     def _drain_queue(self) -> None:
         while True:
@@ -432,15 +513,25 @@ class SlideshowScreen:
             self._next_tex = self._r.texture_from_image(self._next_path)
             if self._next_tex is not None:
                 self._next_tex.blend_mode = pg.BLENDMODE_BLEND
+            else:
+                # 作り直せなかった。パスを持ったまま先読み済み扱いにすると
+                # 次の先読みが走らず止まるため、未取得へ戻して先読みし直させる
+                self._next_path = None
+                self._next_loaded_index = None
+                self._preloading_index = None
+                self._ensure_preload()
         logger.info('SDL の再生成にあわせてテクスチャを作り直しました（gen=%d）', self._gen)
 
     def _drop_textures(self) -> None:
         self._current_tex = None
         self._next_tex = None
+        self._next_loaded_index = None
 
     def _drop_next(self) -> None:
         self._next_tex = None
         self._next_path = None
+        self._next_loaded_index = None
+        self._reset_next_candidate()
 
     def _update_overlay(self) -> None:
         info = self._photos[self._index] if self._photos else None
