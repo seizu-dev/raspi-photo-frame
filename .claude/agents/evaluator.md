@@ -11,7 +11,7 @@ description: >
   設計方針そのものを決める相談には使わない（それは advisor の役割）。
   コードを書く・修正する作業には使わない（それは implementer / coder の役割）。
   事実を集めるだけの調査には使わない（それは researcher の役割）。
-model: sonnet
+model: opus
 effort: medium
 ---
 

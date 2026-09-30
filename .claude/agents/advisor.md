@@ -17,7 +17,7 @@ description: >
   ライブラリの現行仕様の裏取りといった事実調査そのものには使わない
   （それは researcher の役割）。
 tools: Read, Grep, Glob, WebFetch, WebSearch
-model: fable
+model: opus
 effort: high
 ---
 
