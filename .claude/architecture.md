@@ -99,7 +99,8 @@ Docker 基盤 約75MB と他コンテナを引いた残りがアプリの取り�
     を超える画像をデコード前にスキップする。
     JPEG は `draft()` の縮小デコードが効くが PNG/WebP には無いため厳しくしてある。
     **PNG/WebP の値は実機（階層3、v1.3.0）の実測に基づく**（SPECIFICATION.md 9-11）。
-    ただし WebP の直接デコード経路（8MP）の実機値は未測定（v1.3.1 で測定予定）。
+    WebP の直接デコード経路（8MP）の実機値（v1.3.1、階層3）は静止 RGB +64MB、
+    RGBA+回転 +90MB、lossless +102MB（旧経路は 8MP で +125MB）。
 -   **EXIF 補正（`exif_transpose`）を Immich 経路に掛けない。** `delivers_originals`
     が True の取得元（Drive）だけに適用する。
 -   **署名付き URL（Drive の `thumbnailLink` 等）とアクセストークンをログに出さない。**
@@ -230,7 +231,20 @@ src/
     （`gui/screens/settings.py` の `_ROWS`。**3点セットは揃っている**）。
     **`0` は「無制限」を意味する特別値**で、`enforce_limit()` は `limit_mb <= 0` で
     何もせず戻る。スライダーは数値をそのまま表示するため、意味は表示名の側に
-    埋め込んである（`（0で無制限）`）。片方だけ変えると 0 の解釈がずれる
+    埋め込んである（`（0で無制限）`）。片方だけ変えると 0 の解釈がずれる。
+    **保存経路（`store_photo()`）は `ENFORCE_EVERY_N_STORES` 回ごとに
+    `_schedule_enforce()` で走査を背景のデーモンスレッド1本（実行中なら起動しない）へ
+    任せ、保存したワーカーはすぐ戻る。** 先読みワーカー
+    （`slideshow.py` の `_request_load` → `photo_source.ensure_photo` → `store_photo`）の
+    戻り道で同期走査すると、走査中は先読み結果が届かず自動送りが見送られ続ける
+    （実機で保存20回目・40回目の直後に 74〜92 秒停止。キャッシュ 3,082 ファイル、
+    メモリ圧迫下）。**`store_photo()` の中で `enforce_limit()` を同期で呼ぶ形に
+    戻さないこと。** `enforce_limit(force=True)`（起動時・`photo_cache_max_mb` 変更時・
+    `warm_cache.py`）は同期のまま。カウンタは `_count_lock`、走査と削除は `_lock` と
+    分けてある（同じロックだと、走査中ずっと `_lock` が保持されるため保存ワーカーが
+    カウンタを触るだけで走査完了を待たされる）。「写真をキャッシュしました」のログは
+    走査より前に出るので、走査が遅いとログ上は「キャッシュ済みなのに送られない」
+    ように見えていた
 -   `gui/renderer.py` の `generation` ↔ テクスチャを保持する側
     （`slideshow.py` の `_recreate_if_needed` / `overlay.py` の `_Text`）。
     **消灯で SDL を破棄するとテクスチャは全て無効になる。** 世代の変化を見て
