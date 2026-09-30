@@ -94,9 +94,12 @@ Docker 基盤 約75MB と他コンテナを引いた残りがアプリの取り�
     原本へフォールバックする。
 -   **画素上限なしで原本をデコードしない。** `PhotoCache`（`originals=True`）は
     **形式別の上限 `original_pixel_limit()`**（JPEG 40MP = `MAX_ORIGINAL_PIXELS`、
-    PNG・その他 12MP、WebP 8MP）を超える画像をデコード前にスキップする。
+    PNG・その他 12MP、WebP は直接デコード経路の静止画のみ 8MP。アニメーション WebP と
+    `WebPDecode` が使えない場合は通常経路なので 4MP = `MAX_ORIGINAL_PIXELS_WEBP_FALLBACK`）
+    を超える画像をデコード前にスキップする。
     JPEG は `draft()` の縮小デコードが効くが PNG/WebP には無いため厳しくしてある。
-    **PNG/WebP の値は階層1の実測からの暫定値で、実機（階層3）は未測定。**
+    **PNG/WebP の値は実機（階層3、v1.3.0）の実測に基づく**（SPECIFICATION.md 9-11）。
+    ただし WebP の直接デコード経路（8MP）の実機値は未測定（v1.3.1 で測定予定）。
 -   **EXIF 補正（`exif_transpose`）を Immich 経路に掛けない。** `delivers_originals`
     が True の取得元（Drive）だけに適用する。
 -   **署名付き URL（Drive の `thumbnailLink` 等）とアクセストークンをログに出さない。**
@@ -443,6 +446,27 @@ src/
         返るため、二重回転の恐れがある）。`main.py` / `warm_cache.py` は
         `provider.delivers_originals` を `PhotoCache(..., originals=...)` へ
         そのまま渡す配線を持つ
+    -   **WebP の直接デコード**（`photo_cache.py` の `_decode_webp_direct()` /
+        `_WEBP_DIRECT_AVAILABLE`）↔ `original_pixel_limit()` の WebP 上限切替 ↔
+        `_encode_jpeg()` の上限判定 ↔ `requirements.txt` の `Pillow==10.4.0` 固定。
+        原本モード（`originals=True`）の静止画 WebP だけ、Pillow 非公開 API
+        `PIL._webp.WebPDecode` + `Image.frombuffer` で読み、標準経路（静止画でも
+        WebPAnimDecoder 経由で約15MB/MP）の多重コピーを避ける。
+        -   **上限**: 直接経路の静止画は 8MP。アニメーション WebP と、`WebPDecode` が
+            使えない場合（読み込み時の判定、または実行時に API 異常を検知して
+            モジュールフラグ `_WEBP_DIRECT_AVAILABLE` が False になった場合）は
+            通常経路となり 4MP
+        -   **失敗の扱い**: `WebPDecode` が None（破損）・MemoryError はその1枚をスキップ
+            （フォールバックしない）。API 異常（属性なし・戻り値の形の不一致）だけ
+            警告1回＋通常経路へ戻り、以後は直接経路を使わない
+        -   **順序**: 直接経路は「縮小 → 回転」（原寸の transpose コピーを避けるため）。
+            Orientation 5〜8 の WebP は従来と画素が完全一致しない（寸法は一致）。
+            向き補正は EXIF を持たないため自前の対応表（`exif_transpose` と同一）。
+            元画像（`Image.open`）は形式・上限・向きを確定したら閉じてからデコードする
+        -   Immich（`originals=False`）・JPEG・PNG・回転なし WebP の出力は変えない
+        **Pillow を上げるときは `PIL._webp.WebPDecode` の存続と戻り値の形
+        （pixels, width, height, mode, icc, exif）を確認すること。**
+        消えていてもフォールバックで動くが、WebP の上限が黙って 4MP に下がる
     -   `originals` ↔ `_encode_jpeg()` の JPEG 保存設定（`JPEG_QUALITY` /
         `ORIGINALS_JPEG_QUALITY` + `ORIGINALS_JPEG_SUBSAMPLING`）。**表紙経路
         （`store_thumbnail()`、`max_size=None`）でも `originals=True` の JPEG にだけ
@@ -489,7 +513,9 @@ src/
     -   `_DECODE_LOCK`（`photo_cache.py` のモジュールレベルのロック）↔
         Pillow でデコードする全箇所（`_encode_jpeg()` 経由の写真本体・サムネイルの
         両方）。プロセス全体で1本にしてあるのは、原本を扱う取得元（PR2）の
-        同時デコードでピークメモリが跳ね上がるのを防ぐため
+        同時デコードでピークメモリが跳ね上がるのを防ぐため。
+        **`threading.RLock`**（`Lock` に戻さないこと）: `WebPDecode` が使えないと
+        分かったとき、同じスレッドが `_encode_jpeg()` を通常経路でやり直す（再入する）ため
     -   `active_provider`（`config_manager.py` の既定値 `""`。画面のウィジェットは
         持たない実行時状態） ↔ `photo_provider.reconcile_settings()`（前回と取得元が
         変わったときだけ `album_id` 等を初期化する）。**`""` → `'immich'` の遷移では
