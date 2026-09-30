@@ -440,7 +440,7 @@ photo-frame の機能仕様を踏襲する。
 *   **画像の取得**: 原本モード（`delivers_originals = True`）。EXIF の向き補正・
     画素上限・quality 95 / 4:4:4 は Drive の原本経路と同じ。
 *   **撮影日時**: EXIF `DateTimeOriginal` のみ。無ければ表示しない。
-*   **画素上限**: 形式別（JPEG 40MP / PNG 12MP / WebP 8MP。PNG/WebP は暫定値、9-11 参照）
+*   **画素上限**: 形式別（JPEG 40MP / PNG 12MP / WebP 8MP。ただしアニメーション WebP と `WebPDecode` が使えない場合は 4MP。9-11 参照）
     を超える PNG/WebP はデコード前にスキップする（撮影日の読み取りも同じ上限で抑止）。
 *   **更新の反映**: `rescan_on_load = True` のため、写真リストは読み込みのたびに
     走査し直す（キャッシュが有効期間内でも使わない。失敗・空なら失効キャッシュへ
@@ -987,11 +987,15 @@ JPEG/PNG/WebP に限った例外経路として扱う方針**（PR2）を採っ�
 画質パラメータはほぼ効果が無かった。この結果を受け、`gdrive_api.py` の
 `THUMBNAIL_OVERSAMPLE = 2` で常に2倍要求するようにした。
 
-**形式別の画素上限（暫定）と階層1の実測（x86 の maxrss。実機は未測定）**:
+**形式別の画素上限と実測**:
 縮小デコード（`draft()`）を持たない PNG/WebP は全画素をデコードするため、原本の
 画素上限を形式別にした（`photo_cache.py` の `original_pixel_limit()`）。
-JPEG 40MP / PNG・その他 12MP / WebP 8MP。**PNG/WebP の値は下記実測からの見積もりで
-暫定。実機（階層3）で確定させること。**
+JPEG 40MP / PNG・その他 12MP / WebP 8MP（直接デコード経路の静止画のみ）。アニメーション
+WebP と、`PIL._webp.WebPDecode` が使えない場合（読み込み時の判定、または実行時に API
+異常を検知してフラグが False になった場合）は通常経路なので
+`MAX_ORIGINAL_PIXELS_WEBP_FALLBACK` = 4MP。
+
+階層1（x86・maxrss）の初期見積もり（30MP の画像）:
 
 | 30MP の画像に対する処理 | maxrss の増加（階層1・x86） |
 |---|---|
@@ -1001,6 +1005,53 @@ JPEG 40MP / PNG・その他 12MP / WebP 8MP。**PNG/WebP の値は下記実測�
 | 同・上限で抑止 | +1MB |
 | PNG 本体 | +129MB（上限超過のためスキップ） |
 | WebP 本体 | +463MB（上限超過のためスキップ） |
+
+**実機（階層3、arm64、v1.3.0）の実測**（アプリと別プロセスで稼働中、ホストの
+MemAvailable 約190MB。デコード処理のピーク増加量）。WebP は標準経路（従来経路）の値:
+
+| 処理 | 画素数 | ピーク増加 |
+|---|---|---|
+| 写真本体 PNG | 8MP | +41MB |
+| 同 | 12MP | +61MB |
+| 写真本体 WebP（標準経路） | 4MP | +65MB |
+| 同 | 8MP | +121MB |
+| 写真本体 JPEG（`draft` あり） | 24MP | +12MB |
+| 同 | 40MP | +17MB |
+| 表紙 JPEG | 40MP | +5MB |
+| 表紙 PNG | 12MP | +51MB |
+| 表紙 WebP（標準経路） | 8MP | +125MB |
+
+走査（ローカル取得元）は 300枚・3アルバムで 1回目 1.47秒 / 2回目 0.66秒。
+1MP あたりでは PNG が約5MB、WebP（標準経路）が約15MB と、WebP が3倍重い。
+
+**WebP が重い理由と直接デコード**: Pillow 10.4.0 の WebP プラグインは静止画でも
+WebPAnimDecoder 経由でデコードする。libwebp のキャンバス -> `get_next()` の bytes ->
+Pillow のバッファと、同じ画像が複数回複製されるため約15MB/MP になる。原本モードの
+静止画 WebP だけ、非公開 API `PIL._webp.WebPDecode` + `Image.frombuffer` で1回の
+デコードに済ませる（`_decode_webp_direct()`）。Immich（`originals=False`）は変えない。
+
+-   **処理順**: 元画像（`Image.open`）は形式・画素上限・Orientation を確定したら閉じてから
+    デコードする。直接経路は「縮小 -> 回転」の順（原寸の transpose コピーを避けるため）。
+    **Orientation 5〜8 の WebP は従来（回転 -> 縮小）と画素が完全一致しない**（寸法は一致）。
+    実写の写真3枚（3000x2000 に拡大、RGB/RGBA、Orientation 5/6/8）で旧出力との PSNR は
+    43〜51dB（階層1）。合成ノイズ画像では 24〜48dB と差が大きく出る。回転なし WebP・JPEG・
+    PNG・Immich の出力はバイト一致。
+-   **失敗の扱い**: `WebPDecode` が None（破損）・MemoryError はその1枚をスキップ
+    （フォールバックしない）。API 異常だけ警告1回＋通常経路へ戻り、以後は使わず上限も 4MP。
+    このとき `_DECODE_LOCK`（`threading.RLock`）を同じスレッドが再入する。
+-   **階層1（x86）の maxrss 増加**（8MP。旧 -> 新。新は bytes 入力 / Path 入力）:
+
+| 画像（8MP） | 旧 | 新（bytes / Path） |
+|---|---|---|
+| 静止 RGB | +127MB | +65MB / +65MB |
+| RGBA + Orientation 6 | +177MB | +78MB / +91MB |
+| lossless（ノイズ画像。最悪値寄り） | +150MB | +80MB / +103MB |
+| アニメーション | +137MB | 上限 4MP によりスキップ |
+
+    4MP の静止 RGB（Path）は +66MB -> +43MB。**新経路の実機（arm64）値は未測定
+    （v1.3.1 で測定予定）。** 標準経路の実機実測（4MP で +65MB）に合わせ、標準経路に
+    なる場合の WebP 上限を 4MP にしている。Pillow は `requirements.txt` で 10.4.0 に
+    固定しており、更新時は `WebPDecode` の存続を確認する。
 
 **キャッシュ再エンコード時の色差間引き（階層1）**: `photo_cache.py` の JPEG 保存を
 既定（quality=90・4:2:0）のままにすると、イラストの線まわりに色にじみが出る。

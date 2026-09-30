@@ -6,6 +6,7 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta
+from contextlib import ExitStack
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -74,25 +75,104 @@ THUMBNAIL_MAX_SHORT_SIDE = 250
 # RAM 416MB の実機では成り立たない。超過分はデコードせずスキップする
 # （`.claude/architecture.md`「画素上限なしで原本をデコードしない」）。
 #
-# **PNG 12MP / WebP 8MP は暫定値。** 階層1の RSS 実測からの見積もりで、
-# 実機（階層3）では測っていない。実機で確定させること。
+# PNG / WebP の値は実機（arm64、v1.3.0）の実測に基づく。通常の経路（Pillow の
+# Image.load）のピークは WebP 8MP で +121MB、4MP で +65MB、PNG 12MP で +61MB、
+# 8MP で +41MB、JPEG 40MP（draft あり）で +17MB だった。Pillow 10.4.0 の WebP は
+# 静止画でも WebPAnimDecoder 経由でデコードし、同じ画像を複数回複製するため
+# 約15MB/MP と重い。`_decode_webp_direct()` はこれを `PIL._webp.WebPDecode` で避ける
+# （階層1の実測、store_photo・静止 RGB・bytes 入力で 8MP: +127MB -> +65MB。
+# 最悪ケースの RGBA + Orientation 6 の 8MP は +78MB（旧 +177MB））。**新経路の実機値は
+# 未測定**（v1.3.1 で測定予定）。アニメーション WebP と、WebPDecode が使えない
+# 場合は通常経路（+137MB 相当）になるため、画素上限を 4MP へ下げて掛ける。
 # `MAX_ORIGINAL_PIXELS` は JPEG の上限を指す名前として従来どおり残す。
 MAX_ORIGINAL_PIXELS = 40_000_000
 MAX_ORIGINAL_PIXELS_PNG = 12_000_000
 MAX_ORIGINAL_PIXELS_WEBP = 8_000_000
+# WebPDecode が使えない環境（通常経路しか無い）での WebP の上限。実機の実測で
+# 4MP が +65MB に収まるため、8MP（+121MB）は許さない。
+MAX_ORIGINAL_PIXELS_WEBP_FALLBACK = 4_000_000
+
+# `PIL._webp.WebPDecode` は Pillow の非公開 API。Pillow は requirements.txt で固定
+# （10.4.0）しているが、将来の更新で消えうるため、無ければ通常経路へ戻し、
+# 上限も厳しい側に倒す（判定はモジュール読み込み時に1回）。
+try:
+    from PIL import _webp as _pil_webp
+    _WEBP_DIRECT_AVAILABLE = callable(getattr(_pil_webp, 'WebPDecode', None))
+except ImportError:
+    _pil_webp = None
+    _WEBP_DIRECT_AVAILABLE = False
 
 
 def original_pixel_limit(image_format: str | None) -> int:
     """
-    形式（`Image.format`）ごとの原本の画素上限を返す。JPEG は 40MP、WebP は 8MP、
-    それ以外（PNG を含む。縮小デコードの無い形式）は PNG と同じ値に倒す。
+    形式（`Image.format`）ごとの原本の画素上限を返す。JPEG は 40MP、WebP は 8MP
+    （`WebPDecode` が使えない環境では 4MP）、それ以外（PNG を含む。縮小デコードの
+    無い形式）は PNG と同じ値に倒す。
     `local_api.py` も撮影日の読み取り可否の判定にこれを使う（式を複製しない）。
     """
     if image_format == 'JPEG':
         return MAX_ORIGINAL_PIXELS
     if image_format == 'WEBP':
-        return MAX_ORIGINAL_PIXELS_WEBP
+        return (MAX_ORIGINAL_PIXELS_WEBP if _WEBP_DIRECT_AVAILABLE
+                else MAX_ORIGINAL_PIXELS_WEBP_FALLBACK)
     return MAX_ORIGINAL_PIXELS_PNG
+
+
+_WEBP_OK, _WEBP_SKIP, _WEBP_UNAVAILABLE = 'ok', 'skip', 'unavailable'
+
+
+def _decode_webp_direct(raw: 'bytes | Path') -> 'tuple[str, Image.Image | None]':
+    """
+    静止画の WebP を `PIL._webp.WebPDecode` で直接デコードする。戻り値は
+    (状態, 画像)。状態は次のいずれか。
+
+    - `_WEBP_OK`: デコードできた（画像あり）。
+    - `_WEBP_SKIP`: この1枚だけ諦める（壊れたデータ・MemoryError・読み込み失敗）。
+      API 自体は正常なので、呼び出し側は通常経路へ落とさずスキップする
+      （通常経路は約15MB/MP で、MemoryError になるような状況では落とす意味が無い）。
+    - `_WEBP_UNAVAILABLE`: 非公開 API の形が想定と違う（属性なし・戻り値の形の不一致等）。
+      呼び出し側が通常経路へ戻り、以後は使わない。
+
+    Pillow 10.4.0 の WebPImagePlugin は静止画でも WebPAnimDecoder を通し、
+    libwebp のキャンバス -> get_next() の bytes -> Pillow バッファと同じ画像を
+    複数回複製するため約15MB/MP になる。WebPDecode は1回のデコードで済む。
+    返す画像は EXIF を持たない（向きの補正は呼び出し側が行う）。
+    """
+    try:
+        data = raw.read_bytes() if isinstance(raw, Path) else raw
+    except (OSError, MemoryError) as e:
+        logger.warning('WebP を読み込めませんでした: %s', e)
+        return _WEBP_SKIP, None
+    try:
+        result = _pil_webp.WebPDecode(data)
+    except MemoryError as e:
+        logger.warning('WebP のデコード中にメモリが足りませんでした: %s', e)
+        return _WEBP_SKIP, None
+    except Exception as e:  # 非公開 API のため、呼び出し形の不一致等は「使えない」と見なす
+        logger.warning('WebPDecode を使えないため通常のデコードに戻します: %s', e)
+        return _WEBP_UNAVAILABLE, None
+    del data
+    if result is None:
+        # 壊れたデータでは None が返る（API の異常ではない）
+        logger.warning('WebP をデコードできませんでした（壊れたデータ）')
+        return _WEBP_SKIP, None
+    try:
+        pixels, width, height, mode, _icc, _exif = result
+        del result
+        # RGB はコピーして作られるのでここで pixels を手放せる。RGBA はゼロコピーで
+        # 参照するが、Pillow 内部が参照を持つため pixels を手放しても画素は生きている
+        # （実測で確認）。
+        im = Image.frombuffer(mode, (width, height), pixels, 'raw', mode, 0, 1)
+        del pixels
+    except MemoryError as e:
+        logger.warning('WebP のデコード中にメモリが足りませんでした: %s', e)
+        return _WEBP_SKIP, None
+    except (TypeError, ValueError, AttributeError) as e:
+        logger.warning('WebPDecode の戻り値が想定と違うため通常のデコードに戻します: %s', e)
+        return _WEBP_UNAVAILABLE, None
+    return _WEBP_OK, im
+
+
 
 # プロセス全体で1本のデコードロック。原本を扱う取得元（Google Drive 等。PR2 で追加）は
 # HEIC 等のデコード前サイズが大きい画像をそのまま開くことがあり、先読みスレッドと
@@ -100,7 +180,9 @@ def original_pixel_limit(image_format: str | None) -> int:
 # （RAM 512MB が最大の制約のため、デコード〜エンコードの区間はプロセス全体で
 # 直列化してピークを抑える。Immich の preview/thumbnail はそこまで大きくないが、
 # 取得元によらず同じ経路を通るここで一律に直列化する）。
-_DECODE_LOCK = threading.Lock()
+# RLock なのは、WebPDecode が使えないと分かったときに同じスレッドが
+# `_encode_jpeg()` を通常経路でやり直す（再入する）ため。
+_DECODE_LOCK = threading.RLock()
 
 
 def normalize_fit(value: Any) -> str:
@@ -482,6 +564,79 @@ class PhotoCache:
 
     # ------------------------------------------------------------------ 内部処理
 
+    @staticmethod
+    def _shrink(img: Image.Image, max_size: tuple[int, int] | None, fit: str,
+                rotated: bool = False) -> Image.Image:
+        """
+        表示解像度（max_size 指定あり）または短辺 THUMBNAIL_MAX_SHORT_SIDE（なし）へ縮める。
+
+        `rotated` は img が「90°回す前の軸」のときに True（WebP の直接デコード経路。
+        縮小してから回転するため、fit の判定と目標寸法は見た目の向きで行い、
+        目標だけ回転前の軸へ入れ替える）。cover の中央クロップは 90°回転・反転と
+        可換なので、見た目の結果は「回転してから縮小」と同じになる。
+        """
+        eff_size = (img.height, img.width) if rotated else img.size
+        eff_box = max_size
+        if rotated and max_size:
+            max_size = (max_size[1], max_size[0])
+        if max_size:
+            # fit の判定は見た目の向き（eff_size と元の max_size）で行う
+            resolved_fit = resolve_fit(fit, eff_size, eff_box)
+            if resolved_fit == FIT_COVER:
+                # ImageOps.fit() は「元画像側で切り抜き範囲を決めてから
+                # 1回の resize で目的サイズを出す」実装になっている。
+                # 「まず crop() してから thumbnail() で拡縮する」素直な
+                # 2段実装に戻すと、パノラマのような巨大画像で
+                # crop 後の中間画像がまだ大きいままメモリに乗り、
+                # ピークメモリが膨らむ（RAM 512MB が最大の制約のため
+                # ここは必ず1回の resize で済ませること）。
+                # thumbnail() と異なり、元が max_size より小さい場合は
+                # 拡大される（「隙間なく埋める」以上そうなる仕様どおりの
+                # 非対称。小さい写真では contain と解像感が変わる）。
+                img = ImageOps.fit(img, max_size, method=Image.Resampling.LANCZOS,
+                                   centering=(0.5, 0.5))
+            else:
+                # thumbnail() はアスペクト比を保ち、元より大きくはしない
+                img.thumbnail(max_size, Image.Resampling.LANCZOS)
+        else:
+            # サムネイル保存経路（store_thumbnail() 経由）。Immich のサムネイルは
+            # 既に短辺 250px 程度（333x250 / 444x250）のためここでは縮小されない
+            # （寸法が変わらないことを実測で確認済み）。Drive 等（PR2）が
+            # 縮小前のサムネイルを返す場合に備え、短辺が上限を超えるときだけ
+            # 縮小する（拡大はしない・アスペクト比は維持する）。
+            img_w, img_h = img.size
+            short_side = min(img_w, img_h)
+            if short_side > THUMBNAIL_MAX_SHORT_SIDE:
+                scale = THUMBNAIL_MAX_SHORT_SIDE / short_side
+                img = img.resize(
+                    (max(1, round(img_w * scale)), max(1, round(img_h * scale))),
+                    Image.Resampling.LANCZOS)
+        return img
+
+    def _shrink_then_rotate(self, img: Image.Image, orientation: Any, max_size: tuple[int, int] | None,
+                            fit: str) -> Image.Image:
+        """
+        WebP の直接デコード結果を「縮小 -> 回転」の順で仕上げる。
+
+        直接デコードした画像は EXIF を持たず `exif_transpose` が使えないうえ、
+        先に回転すると原寸のコピーがもう1枚できてピークが跳ね上がる
+        （RGBA + Orientation 6 の 8MP で +116MB）。そのため小さくしてから回す。
+        対応表は Pillow の `ImageOps.exif_transpose` と同一。
+        """
+        method = {
+            2: Image.Transpose.FLIP_LEFT_RIGHT,
+            3: Image.Transpose.ROTATE_180,
+            4: Image.Transpose.FLIP_TOP_BOTTOM,
+            5: Image.Transpose.TRANSPOSE,
+            6: Image.Transpose.ROTATE_270,
+            7: Image.Transpose.TRANSVERSE,
+            8: Image.Transpose.ROTATE_90,
+        }.get(orientation)
+        img = self._shrink(img, max_size, fit, rotated=orientation in (5, 6, 7, 8))
+        if method is not None:
+            img = img.transpose(method)
+        return img
+
     def _encode_jpeg(self, raw: bytes | Path, max_size: tuple[int, int] | None,
                      fit: str = FIT_CONTAIN) -> bytes | None:
         """
@@ -503,10 +658,16 @@ class PhotoCache:
         （**Immich 経路には一切掛けない**。Immich の preview は既に正しい向きで
         返るため、二重回転の恐れがある）。
         """
+        global _WEBP_DIRECT_AVAILABLE
         source = raw if isinstance(raw, Path) else BytesIO(raw)
         try:
-            with _DECODE_LOCK, Image.open(source) as img:
+            with _DECODE_LOCK, ExitStack() as stack:
+                # 元画像は ExitStack に載せる。WebP の直接デコードでは、形式・上限・
+                # Orientation を確定させたあとに元画像を閉じてから（stack.close()）
+                # デコードする（WebPAnimDecoder がファイル全体を常駐させるため）。
+                img = stack.enter_context(Image.open(source))
                 orientation = None
+                direct = False
                 if self.originals:
                     # 画素上限（形式別。original_pixel_limit）はデコード前に img.size だけで
                     # 判定できる（Image.open() は遅延読み込みでヘッダしか読まない）。
@@ -514,6 +675,14 @@ class PhotoCache:
                     # （PoC 実測）になるため、超過分はデコードせずスキップする。
                     px_w, px_h = img.size
                     px_limit = original_pixel_limit(img.format)
+                    direct = (_WEBP_DIRECT_AVAILABLE and img.format == 'WEBP'
+                              and not getattr(img, 'is_animated', False))
+                    if (img.format == 'WEBP' and not direct
+                            and px_limit > MAX_ORIGINAL_PIXELS_WEBP_FALLBACK):
+                        # アニメーション WebP（WebPDecode は先頭フレームしか扱えない）は
+                        # 通常経路（約15MB/MP）でデコードするため、8MP では +137MB に
+                        # なる。通常経路に落ちると決まった時点で厳しい上限へ下げる。
+                        px_limit = MAX_ORIGINAL_PIXELS_WEBP_FALLBACK
                     if px_w * px_h > px_limit:
                         logger.warning(
                             '原本の画素数が上限を超えているためスキップします: %s %dx%d (上限 %dMP)',
@@ -565,7 +734,26 @@ class PhotoCache:
                     # 変えないため）。
                     img.draft('RGB', (THUMBNAIL_MAX_SHORT_SIDE, THUMBNAIL_MAX_SHORT_SIDE))
 
-                if self.originals and orientation in (2, 3, 4, 5, 6, 7, 8):
+                direct_img = None
+                if direct:
+                    # 形式・画素上限・Orientation は確定済み。元画像を閉じて解放してから
+                    # デコードする（ピークメモリの削減。_decode_webp_direct のコメント参照）。
+                    # 元画像は参照を切らないと WebPAnimDecoder が残るため None にする。
+                    stack.close()
+                    img = None
+                    state, decoded = _decode_webp_direct(raw)
+                    if state == _WEBP_SKIP:
+                        return None
+                    if state == _WEBP_UNAVAILABLE:
+                        # 以後は使わない（上限も 4MP へ下がる）。通常経路でやり直す
+                        # （_DECODE_LOCK は RLock のため再入できる）。
+                        _WEBP_DIRECT_AVAILABLE = False
+                        return self._encode_jpeg(raw, max_size, fit)
+                    direct_img = self._shrink_then_rotate(decoded, orientation, max_size, fit)
+                    del decoded
+                if direct_img is not None:
+                    img = direct_img
+                elif self.originals and orientation in (2, 3, 4, 5, 6, 7, 8):
                     # Orientation が無い（1 や None）ときは呼ばない。回転が無くても
                     # 複製が発生しピークメモリが約20MB増えることを PoC で確認したため
                     # （.claude/context/known-issues.md）。これで以降 img.size は
@@ -573,37 +761,8 @@ class PhotoCache:
                     # Immich 経路と全く同じロジックで扱える。
                     img = ImageOps.exif_transpose(img)
 
-                if max_size:
-                    resolved_fit = resolve_fit(fit, img.size, max_size)
-                    if resolved_fit == FIT_COVER:
-                        # ImageOps.fit() は「元画像側で切り抜き範囲を決めてから
-                        # 1回の resize で目的サイズを出す」実装になっている。
-                        # 「まず crop() してから thumbnail() で拡縮する」素直な
-                        # 2段実装に戻すと、パノラマのような巨大画像で
-                        # crop 後の中間画像がまだ大きいままメモリに乗り、
-                        # ピークメモリが膨らむ（RAM 512MB が最大の制約のため
-                        # ここは必ず1回の resize で済ませること）。
-                        # thumbnail() と異なり、元が max_size より小さい場合は
-                        # 拡大される（「隙間なく埋める」以上そうなる仕様どおりの
-                        # 非対称。小さい写真では contain と解像感が変わる）。
-                        img = ImageOps.fit(img, max_size, method=Image.Resampling.LANCZOS,
-                                           centering=(0.5, 0.5))
-                    else:
-                        # thumbnail() はアスペクト比を保ち、元より大きくはしない
-                        img.thumbnail(max_size, Image.Resampling.LANCZOS)
-                else:
-                    # サムネイル保存経路（store_thumbnail() 経由）。Immich のサムネイルは
-                    # 既に短辺 250px 程度（333x250 / 444x250）のためここでは縮小されない
-                    # （寸法が変わらないことを実測で確認済み）。Drive 等（PR2）が
-                    # 縮小前のサムネイルを返す場合に備え、短辺が上限を超えるときだけ
-                    # 縮小する（拡大はしない・アスペクト比は維持する）。
-                    img_w, img_h = img.size
-                    short_side = min(img_w, img_h)
-                    if short_side > THUMBNAIL_MAX_SHORT_SIDE:
-                        scale = THUMBNAIL_MAX_SHORT_SIDE / short_side
-                        img = img.resize(
-                            (max(1, round(img_w * scale)), max(1, round(img_h * scale))),
-                            Image.Resampling.LANCZOS)
+                if direct_img is None:
+                    img = self._shrink(img, max_size, fit)
 
                 # RGBA / P モードのままでは JPEG で保存できない
                 rgb = img if img.mode == 'RGB' else img.convert('RGB')
