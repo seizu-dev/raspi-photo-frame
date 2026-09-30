@@ -301,7 +301,12 @@ class PhotoCache:
 
         # 先読みスレッドとメインスレッドから同時に呼ばれるため、削除処理だけは直列化する
         self._lock = threading.Lock()
+        # 保存回数のカウンタと走査スレッドの管理は _lock とは別のロックで守る。
+        # _lock は走査の間ずっと保持されるため、同じロックでカウンタを触ると
+        # 保存したワーカーが走査の終了を待たされてしまう。
+        self._count_lock = threading.Lock()
         self._store_count = 0
+        self._enforce_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------ 写真本体
 
@@ -350,7 +355,7 @@ class PhotoCache:
             return None
 
         logger.info('写真をキャッシュしました: %s (%d KB)', asset_id, len(data) // 1024)
-        self.enforce_limit()
+        self._schedule_enforce()
         return path
 
     # ------------------------------------------------------------ 写真リスト（JSON）
@@ -504,15 +509,53 @@ class PhotoCache:
         写真本体の総容量が上限を超えていたら、古いものから削除する。
 
         走査コストがあるため、保存のたびではなく ENFORCE_EVERY_N_STORES 回ごとに実行する。
-        force=True で即時実行する（起動時など）。
+        force=True で即時実行する（起動時など）。どちらも呼び出したスレッドで同期的に
+        実行し、削除件数を返す。保存経路（store_photo）は同期実行を避けるため
+        `_schedule_enforce()` を使う。
         """
-        with self._lock:
-            if not force:
+        if not force:
+            with self._count_lock:
                 self._store_count += 1
                 if self._store_count < ENFORCE_EVERY_N_STORES:
                     return 0
                 self._store_count = 0
+        return self._scan_and_trim()
 
+    def _schedule_enforce(self) -> None:
+        """
+        保存回数を数え、N 回に達したら走査を背景のデーモンスレッドで実行する。
+
+        store_photo() は先読みワーカーの戻り道にあり、ここで同期的に rglob + stat を
+        回すと、走査が終わるまで先読み結果がキューに入らず自動送りが見送られ続ける
+        （実機では保存20回目・40回目の直後に 74〜92 秒止まった。メモリ圧迫で
+        dentry キャッシュが追い出され、stat が SD カードへ行くため）。
+        「写真をキャッシュしました」のログは走査より前に出るので、ログ上は
+        「キャッシュ済みなのに送られない」ように見えていた。
+        走査が実行中なら新たに起動しない（重複させない）。
+        """
+        with self._count_lock:
+            self._store_count += 1
+            if self._store_count < ENFORCE_EVERY_N_STORES:
+                return
+            self._store_count = 0
+            if self._enforce_thread is not None and self._enforce_thread.is_alive():
+                return
+            thread = threading.Thread(target=self._enforce_worker,
+                                      name='cache-enforce', daemon=True)
+            self._enforce_thread = thread
+            thread.start()
+
+    def _enforce_worker(self) -> None:
+        """ 背景走査の本体。例外でスレッドが黙って死なないよう握ってログに残す """
+        try:
+            self._scan_and_trim()
+        except Exception:
+            # 次の N 回後に再試行されるだけなので、ログは1回の走査につき1件に留まる
+            logger.exception('キャッシュ上限の確認に失敗しました')
+
+    def _scan_and_trim(self) -> int:
+        """ 全体を走査し、上限超過ぶんを LRU で削除する（_lock で直列化） """
+        with self._lock:
             limit_mb = int(self.config.get('photo_cache_max_mb', 512) or 0)
             if limit_mb <= 0:
                 return 0
