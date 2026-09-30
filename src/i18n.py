@@ -361,6 +361,9 @@ _TEXTS: dict[str, dict[str, str]] = {
     # Google Drive のルートフォルダ直下に直接置かれた写真（サブフォルダに
     # 分類されていないもの）をまとめる仮想アルバムの表示名（src/gdrive_api.py）。
     'album.gdrive_root': {'ja': '未分類', 'en': 'Unsorted'},
+    # ローカルフォルダのルート直下に直接置かれた写真をまとめる仮想アルバムの表示名
+    # （src/local_api.py。gdrive_root と同じ契約）。
+    'album.local_root': {'ja': '未分類', 'en': 'Unsorted'},
 
     # --- ステータス（main.py の set_status()） -----------------------------
     # 取得元に依存しない文言にしてある（PR1 で Immich 以外の取得元も選べるように

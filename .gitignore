@@ -20,6 +20,9 @@ venv/
 # キャッシュ
 cache/
 
+# ローカルフォルダ取得元の写真置き場（PF_LOCAL_PHOTO_DIR の既定）
+/photos/
+
 # 先行プロジェクト photo-frame の参照用 clone（移植元。追跡しない）
 /.reference/
 

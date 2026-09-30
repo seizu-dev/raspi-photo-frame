@@ -93,7 +93,10 @@ Docker 基盤 約75MB と他コンテナを引いた残りがアプリの取り�
     （`thumbnailLink`）が使えない場合はスキップし、JPEG/PNG/WebP に限って
     原本へフォールバックする。
 -   **画素上限なしで原本をデコードしない。** `PhotoCache`（`originals=True`）は
-    `MAX_ORIGINAL_PIXELS` を超える画像をデコード前にスキップする。
+    **形式別の上限 `original_pixel_limit()`**（JPEG 40MP = `MAX_ORIGINAL_PIXELS`、
+    PNG・その他 12MP、WebP 8MP）を超える画像をデコード前にスキップする。
+    JPEG は `draft()` の縮小デコードが効くが PNG/WebP には無いため厳しくしてある。
+    **PNG/WebP の値は階層1の実測からの暫定値で、実機（階層3）は未測定。**
 -   **EXIF 補正（`exif_transpose`）を Immich 経路に掛けない。** `delivers_originals`
     が True の取得元（Drive）だけに適用する。
 -   **署名付き URL（Drive の `thumbnailLink` 等）とアクセストークンをログに出さない。**
@@ -113,6 +116,8 @@ src/
   gdrive_api.py             Google Drive の共有フォルダを写真取得元にする
                             PhotoProvider 実装（新規。PR2）。サーバー側の縮小
                             （thumbnailLink）を優先し、原本は例外経路として扱う
+  local_api.py              ローカルフォルダを写真取得元にする PhotoProvider 実装
+                            （新規。サブフォルダ＝アルバム。原本モード。HEIC は扱わない）
   photo_cache.py            表示解像度確定済み画像のディスクキャッシュ（再設計。
                             取得元ごとに namespace でサブディレクトリを分ける）
   photo_source.py           provider とキャッシュを繋ぐ層（新規。フォールバックと表示順。
@@ -387,11 +392,34 @@ src/
     `gdrive_api.py` の `DEFAULT_SA_KEY_FILENAME`（`gdrive-service-account.json`）。
     ファイル名を変えるときは3箇所を揃える
 -   写真取得元の抽象化（PR1/PR2。`.claude/plans/abundant-weaving-kernighan.md`）で
-    生まれた組。取得元をさらに追加するとき（将来のローカルフォルダ対応等）は
+    生まれた組。取得元をさらに追加するときは
     以下をすべて確認する。
     -   `PF_PHOTO_PROVIDER` 環境変数 ↔ `photo_provider.py` の `create_provider()` の
         分岐 ↔ `.env.sample` のコメント ↔ README の資格情報節（`GDRIVE_SA_KEY_FILE` /
         `GDRIVE_ROOT_FOLDER_ID` を含む）
+    -   `PF_PHOTO_PROVIDER=local` ↔ `local_api.py` の `LOCAL_PHOTO_ROOT`
+        （未設定なら `/photos`、無ければ `./photos`）↔ `docker-compose.yml` の
+        `${PF_LOCAL_PHOTO_DIR:-./photos}:/photos:ro` の bind mount ↔ `.env.sample` の
+        `PF_LOCAL_PHOTO_DIR`（ホスト側パス）。マウント先を変えるなら
+        `LOCAL_PHOTO_ROOT` の既定（`/photos`）も揃える
+    -   `PhotoProvider.rescan_on_load` ↔ `photo_source.load_list()` ↔
+        `_fetch_assets_info()` の戻り値。True の取得元（ローカル）は生きたキャッシュを
+        使わず毎回取得する。**走査に成功して空なら空を採用し、キャッシュも空へ更新する**
+        （消した写真を失効キャッシュから復活させない）。**I/O エラーだけ
+        `ProviderError` → 失効キャッシュへフォールバック。** `_fetch_assets_info()` は
+        `None` = 失敗（`ProviderError`）/ `[]` = 成功で空、を区別して返す
+        （`rescan_on_load` の取得元だけが区別し、それ以外は従来どおり同じ扱い）。
+        全アルバムが失敗したときも `ProviderError` を送出して失敗側に倒す。
+        アルバムフォルダの消失は空扱い（失敗ではない）。
+        **`LocalFolderAPI.fetch_albums()` はルートを読めないとき `ProviderError` を
+        送出する**（Immich / Drive は握って空リストを返すので契約が取得元で異なる。
+        `album.py` のワーカーは全例外を握るため動くが、取得元を足すときは注意）。
+        Immich / Drive は `rescan_on_load = False`（通信が高価なため）
+    -   i18n の `album.local_root` も `name_key` 契約に乗る（`album.gdrive_root` と同じ。
+        `local_api.py` の「未分類」は `albumName=''` + `name_key`、`is_virtual` は付けない）
+    -   **ローカルも HEIC/HEIF を扱わない。** `local_api.py` の `IMAGE_EXTENSIONS`
+        （JPEG/PNG/WebP）と `SKIPPED_EXTENSIONS`。Drive のような縮小済みの手段が無く、
+        原本デコードのピークが実機 RAM で成り立たないため
     -   `PhotoProvider.cache_namespace` ↔ `PhotoCache.__init__` の `namespace` 引数
         （`photos/<ns>/` 等へのサブディレクトリ分け）↔ `enforce_limit()` /
         `get_total_size()` が見るルート（`self._photos_root` = 常に
@@ -407,14 +435,20 @@ src/
         `photo_provider.reconcile_settings()`（`source == 'favorites'` なのに
         非対応の取得元へ切り替わったときに `daily_pickup` へ寄せる保険）
     -   `PhotoProvider.delivers_originals` ↔ `PhotoCache.__init__` の `originals`
-        引数 ↔ `_encode_jpeg()` 内の EXIF 補正・画素上限（`MAX_ORIGINAL_PIXELS`）。
+        引数 ↔ `_encode_jpeg()` 内の EXIF 補正・画素上限（形式別の `original_pixel_limit()`。
+        `local_api.py` の `_read_date()` も撮影日の読み取り抑止に同じ関数を使う対の組で、
+        式を複製しない）。
         **True の取得元（Drive）にしか掛けない。Immich 経路（False）には
         `exif_transpose` を一切掛けない**（Immich の preview は既に正しい向きで
         返るため、二重回転の恐れがある）。`main.py` / `warm_cache.py` は
         `provider.delivers_originals` を `PhotoCache(..., originals=...)` へ
         そのまま渡す配線を持つ
     -   `originals` ↔ `_encode_jpeg()` の JPEG 保存設定（`JPEG_QUALITY` /
-        `ORIGINALS_JPEG_QUALITY` + `ORIGINALS_JPEG_SUBSAMPLING`）。**写真本体
+        `ORIGINALS_JPEG_QUALITY` + `ORIGINALS_JPEG_SUBSAMPLING`）。**表紙経路
+        （`store_thumbnail()`、`max_size=None`）でも `originals=True` の JPEG にだけ
+        `draft('RGB', (250, 250))` を掛ける**（全画素デコードを避けるため。正方形で
+        要求するのは Orientation 5〜8 の縦横入れ替えで軸を取り違えないため）。
+        **`originals=False`（Immich）の出力はバイト単位で不変**という契約を崩さない。**写真本体
         （`max_size` 指定あり）だけ原本モードで quality=95・4:4:4 へ上げる**
         （4:2:0 の色差間引きがイラストの線まわりに色にじみを出すため。
         SPECIFICATION.md 9-11 に PSNR の実測値）。**Immich 側（`originals=False`）

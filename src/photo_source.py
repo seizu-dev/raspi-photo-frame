@@ -47,7 +47,8 @@ class PhotoSource:
         """
         写真リストを取得する。
 
-        1. キャッシュが生きていればそれを使う（force=True なら飛ばす）
+        1. キャッシュが生きていればそれを使う（force=True、または provider の
+           `rescan_on_load` が True なら飛ばす）
         2. provider を叩き、取れたらキャッシュへ保存する
         3. provider が空を返したら、失効したキャッシュでも使う（通信断での表示継続）
 
@@ -63,7 +64,11 @@ class PhotoSource:
         if self.config.get('source') == 'daily_pickup':
             self.cache.cleanup_list_cache('daily_pickup_', key)
 
-        if not force:
+        rescan = getattr(self.provider, 'rescan_on_load', False)
+        # ローカルフォルダは中身がいつでも変わり、走査も安価で通信を伴わないため、
+        # キャッシュが生きていても毎回取り直す。失敗（ProviderError）なら下の失効
+        # キャッシュへ落ちる（走査成功で空の場合は下で空を返す）（Immich / Drive は False で従来どおり）。
+        if not force and not rescan:
             cached = self.cache.get_asset_list(key)
             if cached:
                 logger.info('写真リストをキャッシュから読み込みました: %s (%d 件)', key, len(cached))
@@ -73,6 +78,15 @@ class PhotoSource:
         if assets:
             self.cache.store_asset_list(key, assets)
             return self._ordered(assets)
+
+        if rescan and assets is not None:
+            # 走査に成功して結果が空なのは「写真が無くなった」という正しい結果。
+            # 失効キャッシュへ落とすと、消した写真が表示され続ける。キャッシュも
+            # 空へ更新し、あとで I/O エラーになったときに消した写真が復活しない
+            # ようにする（rescan_on_load の取得元だけ。Immich / Drive は通信断と
+            # 区別できないので従来どおり下の失効キャッシュへ落ちる）。
+            self.cache.store_asset_list(key, [])
+            return []
 
         stale = self.cache.get_asset_list(key, ignore_lifetime=True)
         if stale:
@@ -105,7 +119,7 @@ class PhotoSource:
         else:
             logger.info(message)
 
-    def _fetch_assets_info(self) -> list[dict[str, Any]]:
+    def _fetch_assets_info(self) -> list[dict[str, Any]] | None:
         """
         設定された取得元に応じて、表示する写真のアセット情報リストを取得する。
 
@@ -113,6 +127,10 @@ class PhotoSource:
         フォールバックする正常系として扱うため、`ProviderError` は空リストに変換する。
         表示順のシャッフル（display_mode == 'random'）は `_ordered()` の責務なので
         ここでは行わない（元 `ImmichAPI.fetch_assets_info()` から移植。文言は変えていない）。
+
+        戻り値の `None` は「`ProviderError`（取得に失敗した）」、空リストは「取得はできたが
+        写真が無かった」を表す。呼び出し側（`load_list()`）で両者を区別するのは
+        `rescan_on_load` の取得元だけで、それ以外は `None` も空も同じ扱い（従来どおり）。
         """
         source = self.config.get('source')
         try:
@@ -128,7 +146,7 @@ class PhotoSource:
                 assets_info = []
         except ProviderError as e:
             self._update_status(f'API接続エラー: {e}')
-            return []
+            return None
 
         if not assets_info:
             self._update_status('写真が見つかりませんでした。設定を確認してください。')
@@ -158,6 +176,7 @@ class PhotoSource:
                     [album_name_map.get(aid, aid) for aid in selected_album_ids])
 
         assets_info: list[dict[str, Any]] = []
+        failed = 0
         for album_id in selected_album_ids:
             album_name = album_name_map.get(album_id, '')
             try:
@@ -170,8 +189,16 @@ class PhotoSource:
             except ProviderError as e:
                 # 1つのアルバムが取れなくても残りは表示したいので、ここだけは継続する
                 self._update_status(f'アルバム取得エラー (ID: {album_id}): {e}')
+                failed += 1
                 continue
             assets_info.extend(items)
+
+        if (failed and failed == len(selected_album_ids)
+                and getattr(self.provider, 'rescan_on_load', False)):
+            # 全アルバムが失敗したのに空リストを返すと、`load_list()` が「走査成功で
+            # 空」と誤認する。失敗として伝える（rescan_on_load の取得元だけ。
+            # Immich / Drive は従来どおり空リストのまま失効キャッシュへ落ちる）
+            raise ProviderError('選択されたアルバムをすべて読み込めませんでした')
 
         return assets_info
 

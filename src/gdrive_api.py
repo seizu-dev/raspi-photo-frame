@@ -118,6 +118,8 @@ class GDriveAPI:
         # 変化しないため、album.py 側で有効期限を見て定期的に作り直す必要がある
         # （photo_provider.py の Protocol docstring 参照）。
         self.album_thumbnail_expires = True
+        # 同上（photo_provider.py の Protocol docstring 参照）
+        self.rescan_on_load = False
 
         self.settings = settings_manager
         self._status_callback = status_callback

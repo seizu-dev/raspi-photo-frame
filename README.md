@@ -340,6 +340,48 @@ GDRIVE_ROOT_FOLDER_ID=<the folder ID from step 5>
 Details on how HEIC/HEIF are handled (and why) are in section 9-11 of
 [SPECIFICATION.md](SPECIFICATION.md).
 
+## Appendix: Using a local folder as the photo source
+
+Instead of Immich, the app can show photos from a folder on the device itself, with
+no server and no network access. Subfolders of the root are read as albums.
+
+### Setup
+
+1. Create a folder on the host and put photos in it (e.g. `~/photos`). Create it
+   yourself first (if the path doesn't exist, Docker creates it owned by root). The
+   container mounts it read-only and never writes or deletes.
+2. Set these in `.env`:
+
+   ```bash
+   PF_PHOTO_PROVIDER=local
+   PF_LOCAL_PHOTO_DIR=/home/you/photos   # host path; defaults to ./photos
+   ```
+
+3. Restart with `docker compose up -d`.
+
+Add or remove photos on the host side (`scp` / `rsync` / a Samba share, etc.).
+
+### Folder layout
+
+- Each subfolder directly under the root is treated as one album.
+- Photos placed directly in the root (not inside a subfolder) are grouped into a
+  single virtual "Unsorted" album.
+- Only the immediate contents of a folder are read — nested sub-subfolders and files
+  or folders whose names start with `.` are ignored.
+
+### Limitations
+
+- Supported formats: JPEG, PNG, WebP. HEIC/HEIF, and PNG files over 12 MP or WebP
+  files over 8 MP, are not shown.
+- There is no "favorites" source with a local folder — only album and daily-pickup
+  selection are available.
+- The capture date is shown only when the photo has it in EXIF.
+- Added or removed photos are picked up the next time the photo list is loaded (at
+  startup, after changing the album, or when the date rolls over).
+
+The reasons for the per-format limits are in section 9-11 of
+[SPECIFICATION.md](SPECIFICATION.md).
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).
