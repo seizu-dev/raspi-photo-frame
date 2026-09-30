@@ -347,9 +347,9 @@ no server and no network access. Subfolders of the root are read as albums.
 
 ### Setup
 
-1. Create a folder on the host and put photos in it (see the layout below), e.g.
-   `~/photos`. Create it yourself first: if the path doesn't exist, Docker creates it
-   owned by root. The container mounts it read-only and never writes or deletes.
+1. Create a folder on the host and put photos in it (e.g. `~/photos`). Create it
+   yourself first (if the path doesn't exist, Docker creates it owned by root). The
+   container mounts it read-only and never writes or deletes.
 2. Set these in `.env`:
 
    ```bash
@@ -357,54 +357,30 @@ no server and no network access. Subfolders of the root are read as albums.
    PF_LOCAL_PHOTO_DIR=/home/you/photos   # host path; defaults to ./photos
    ```
 
-   `docker-compose.yml` bind-mounts it to `/photos` in the container, which is where the
-   app looks by default. `LOCAL_PHOTO_ROOT` (a path inside the container) normally
-   doesn't need to change.
 3. Restart with `docker compose up -d`.
 
-To add or remove photos, work on the host side with `scp` / `rsync` / a Samba share,
-or anything else that writes to that folder.
+Add or remove photos on the host side (`scp` / `rsync` / a Samba share, etc.).
 
 ### Folder layout
 
-```
-photos/
-├── IMG_0001.jpg        <- photos directly in the root go into a virtual "Unsorted" album
-├── Trip 2026/          <- each subfolder is one album (sorted by name)
-│   ├── a.jpg
-│   └── b.webp
-└── Family/
-    └── c.png
-```
-
-- Only the immediate contents of a folder are read — nested sub-subfolders are not
-  followed.
-- Hidden files and folders (names starting with `.`) are ignored, as are symbolic
-  links that point outside the root.
-- The photo list is re-scanned every time it is loaded, so additions and removals
-  show up the next time the list is fetched (at startup, after changing the album, or
-  when the date rolls over for daily pickup), not instantly.
+- Each subfolder directly under the root is treated as one album.
+- Photos placed directly in the root (not inside a subfolder) are grouped into a
+  single virtual "Unsorted" album.
+- Only the immediate contents of a folder are read — nested sub-subfolders and files
+  or folders whose names start with `.` are ignored.
 
 ### Limitations
 
-- Supported formats: JPEG, PNG, WebP. **HEIC/HEIF are skipped** — decoding the
-  original of a 48 MP HEIC peaks at about 602 MB, which does not fit in the Zero 2 W's
-  RAM (see section 9-11 of [SPECIFICATION.md](SPECIFICATION.md)). Convert them to JPEG
-  beforehand.
-- The capture date comes from EXIF `DateTimeOriginal` only; if a photo has none, no
-  date is shown (file timestamps are not used).
-- There is no "favorites" source — only album and daily-pickup selection are available.
-- An album's cover is the first image in the folder sorted by name (JPEGs preferred).
-  It is re-fetched once it is older than `cache_lifetime_hours`.
-- PNG files over 12 MP and WebP files over 8 MP are skipped (provisional limits; JPEG
-  allows up to 40 MP), since those formats can't be decoded at reduced size.
-- While the app is running, added or removed files are not picked up until the list is
-  loaded again: at startup, after a settings change, after choosing an album, or when
-  the date rolls over for daily pickup.
-- Copies that don't preserve modification times (e.g. `rsync` without `-t`) make the
-  cache rebuild, because a photo's cache key includes its mtime and size.
-- Photos are decoded from the originals, so EXIF orientation is applied, and the cache
-  is written at higher quality (quality 95, 4:4:4), same as for Google Drive.
+- Supported formats: JPEG, PNG, WebP. HEIC/HEIF, and PNG files over 12 MP or WebP
+  files over 8 MP, are not shown.
+- There is no "favorites" source with a local folder — only album and daily-pickup
+  selection are available.
+- The capture date is shown only when the photo has it in EXIF.
+- Added or removed photos are picked up the next time the photo list is loaded (at
+  startup, after changing the album, or when the date rolls over).
+
+The reasons for the per-format limits are in section 9-11 of
+[SPECIFICATION.md](SPECIFICATION.md).
 
 ## License
 
