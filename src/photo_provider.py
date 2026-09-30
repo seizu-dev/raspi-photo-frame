@@ -1,11 +1,12 @@
 """
 写真取得元（provider）の抽象化層
 
-Immich / Google Drive の2つの取得元を実装している。`ImmichAPI`（immich_api.py）
-と `GDriveAPI`（gdrive_api.py）がどちらも `PhotoProvider` Protocol を満たす
+Immich / Google Drive / ローカルフォルダの3つの取得元を実装している。`ImmichAPI`
+（immich_api.py）・`GDriveAPI`（gdrive_api.py）・`LocalFolderAPI`（local_api.py）が
+いずれも `PhotoProvider` Protocol を満たす
 （.claude/plans/abundant-weaving-kernighan.md PR1/PR2）。
 
-このモジュールは `src.immich_api` / `src.gdrive_api` を **モジュールレベルでは
+このモジュールは `src.immich_api` / `src.gdrive_api` / `src.local_api` を **モジュールレベルでは
 import しない**（`create_provider()` の中でだけ、選ばれた取得元のモジュールだけを
 遅延 import する）。`immich_api.py` は `ProviderError` をこちらから import するため、
 モジュールレベルで相互 import すると循環importになる。`gdrive_api.py` は
@@ -37,7 +38,7 @@ class PhotoProvider(Protocol):
     """
     写真取得元が満たすべき契約。
 
-    - `name`: 'immich' | 'gdrive' | （将来）'local'。ログや `active_provider`
+    - `name`: 'immich' | 'gdrive' | 'local'。ログや `active_provider`
       （実行時状態。`config_manager.py` の既定値）に使う短い識別子
     - `cache_namespace`: `PhotoCache` がサブディレクトリを分けるための名前。
       Immich は既存キャッシュを温存するため空文字（`PhotoCache` は名前空間なしと
@@ -53,6 +54,11 @@ class PhotoProvider(Protocol):
       キャッシュキーの不一致で自然に作り直される（False）。Drive はフォルダの
       表紙を常に固定値 `'cover'`（名前順の先頭画像）で表すため、キーが変わらず
       作り直しの契機が無い（True。`src/gui/screens/album.py` が判定する）
+    - `rescan_on_load`: True の取得元は、写真リストのキャッシュが有効期間内でも
+      毎回 `fetch_*` を叩き直す（`photo_source.py` の `load_list()`）。ローカル
+      フォルダのように、走査が安価で中身がいつでも変わり、しかも通信を伴わない
+      取得元向け。取れなかった（空・失敗）ときは従来どおり古いキャッシュへ
+      フォールバックする。Immich / Drive は通信が高価なので False
     """
 
     name: str
@@ -60,6 +66,7 @@ class PhotoProvider(Protocol):
     supports_favorites: bool
     delivers_originals: bool
     album_thumbnail_expires: bool
+    rescan_on_load: bool
 
     def fetch_albums(self) -> list[dict[str, Any]]:
         """ アルバムの一覧を返す（`id` / `albumName` / `albumThumbnailAssetId` を持つ） """
@@ -118,6 +125,11 @@ def create_provider(config: 'ConfigManager',
         # （src/gdrive_api.py 冒頭のコメント参照）。
         from src.gdrive_api import GDriveAPI
         return GDriveAPI(config, status_callback=status_callback)
+
+    if provider_name == 'local':
+        # 追加依存は無いが、他の取得元と書きぶりを揃えて遅延 import する
+        from src.local_api import LocalFolderAPI
+        return LocalFolderAPI(config, status_callback=status_callback)
 
     raise ValueError(f'未知の PF_PHOTO_PROVIDER です: {provider_name!r}')
 

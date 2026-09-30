@@ -65,11 +65,34 @@ ENFORCE_EVERY_N_STORES = 20
 # 縮小する（拡大はしない・アスペクト比は維持する）。
 THUMBNAIL_MAX_SHORT_SIDE = 250
 
-# 原本を扱う取得元（`delivers_originals = True`。Google Drive の原本経路）の画素上限。
+# 原本を扱う取得元（`delivers_originals = True`。Google Drive の原本経路・
+# ローカルフォルダ）の画素上限。形式ごとに変える。JPEG は draft()（1/2〜1/8 の
+# 縮小デコード）が効いてピークが画素数に比例しないが、PNG / WebP には縮小デコードが
+# 無く、全画素をデコードするため上限を厳しくする（階層1の実測: 30MP の PNG で
+# +129MB、WebP で +463MB）。
 # HEIC の原本を無条件にデコードすると 48MP で maxrss 約602MB（PoC 実測）になり、
 # RAM 416MB の実機では成り立たない。超過分はデコードせずスキップする
 # （`.claude/architecture.md`「画素上限なしで原本をデコードしない」）。
+#
+# **PNG 12MP / WebP 8MP は暫定値。** 階層1の RSS 実測からの見積もりで、
+# 実機（階層3）では測っていない。実機で確定させること。
+# `MAX_ORIGINAL_PIXELS` は JPEG の上限を指す名前として従来どおり残す。
 MAX_ORIGINAL_PIXELS = 40_000_000
+MAX_ORIGINAL_PIXELS_PNG = 12_000_000
+MAX_ORIGINAL_PIXELS_WEBP = 8_000_000
+
+
+def original_pixel_limit(image_format: str | None) -> int:
+    """
+    形式（`Image.format`）ごとの原本の画素上限を返す。JPEG は 40MP、WebP は 8MP、
+    それ以外（PNG を含む。縮小デコードの無い形式）は PNG と同じ値に倒す。
+    `local_api.py` も撮影日の読み取り可否の判定にこれを使う（式を複製しない）。
+    """
+    if image_format == 'JPEG':
+        return MAX_ORIGINAL_PIXELS
+    if image_format == 'WEBP':
+        return MAX_ORIGINAL_PIXELS_WEBP
+    return MAX_ORIGINAL_PIXELS_PNG
 
 # プロセス全体で1本のデコードロック。原本を扱う取得元（Google Drive 等。PR2 で追加）は
 # HEIC 等のデコード前サイズが大きい画像をそのまま開くことがあり、先読みスレッドと
@@ -485,15 +508,16 @@ class PhotoCache:
             with _DECODE_LOCK, Image.open(source) as img:
                 orientation = None
                 if self.originals:
-                    # 画素上限（MAX_ORIGINAL_PIXELS）はデコード前に img.size だけで
+                    # 画素上限（形式別。original_pixel_limit）はデコード前に img.size だけで
                     # 判定できる（Image.open() は遅延読み込みでヘッダしか読まない）。
                     # HEIC の原本を無条件にデコードすると 48MP で maxrss 約602MB
                     # （PoC 実測）になるため、超過分はデコードせずスキップする。
                     px_w, px_h = img.size
-                    if px_w * px_h > MAX_ORIGINAL_PIXELS:
+                    px_limit = original_pixel_limit(img.format)
+                    if px_w * px_h > px_limit:
                         logger.warning(
-                            '原本の画素数が上限を超えているためスキップします: %dx%d (上限 %dMP)',
-                            px_w, px_h, MAX_ORIGINAL_PIXELS // 1_000_000)
+                            '原本の画素数が上限を超えているためスキップします: %s %dx%d (上限 %dMP)',
+                            img.format, px_w, px_h, px_limit // 1_000_000)
                         return None
                     try:
                         orientation = img.getexif().get(0x0112)
@@ -530,6 +554,16 @@ class PhotoCache:
                         img.draft('RGB', (eff_target[1], eff_target[0]))
                     else:
                         img.draft('RGB', max_size)
+                elif self.originals and img.format == 'JPEG':
+                    # 表紙（max_size=None）の原本。draft() を掛けないと、表紙のために
+                    # 全画素をデコードしてしまう（階層1の実測: 30MP の JPEG で +123MB）。
+                    # 後段が短辺を THUMBNAIL_MAX_SHORT_SIDE へ縮めるので、短辺がそれを
+                    # 下回らない縮小率で足りる。正方形を要求すれば「両辺とも
+                    # THUMBNAIL_MAX_SHORT_SIDE 以上」が保証され、Orientation 5〜8 の
+                    # 縦横入れ替えでも要求が変わらないため軸の取り違えが起きない。
+                    # Immich（originals=False）は従来どおり掛けない（出力をバイト単位で
+                    # 変えないため）。
+                    img.draft('RGB', (THUMBNAIL_MAX_SHORT_SIDE, THUMBNAIL_MAX_SHORT_SIDE))
 
                 if self.originals and orientation in (2, 3, 4, 5, 6, 7, 8):
                     # Orientation が無い（1 や None）ときは呼ばない。回転が無くても
