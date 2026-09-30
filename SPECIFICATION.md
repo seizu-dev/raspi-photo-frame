@@ -125,8 +125,8 @@ Immich からの画像取得は帯域制約を前提とし、**原寸画像を�
 ### 3.3. 主要ライブラリ
 
 **写真取得元は `src/photo_provider.py` の `PhotoProvider` Protocol で抽象化している。**
-実装済みは Immich（`src/immich_api.py`）と Google Drive（`src/gdrive_api.py`）の
-2つで、環境変数 `PF_PHOTO_PROVIDER`（既定 `immich`）で選択する
+実装済みは Immich（`src/immich_api.py`）・Google Drive（`src/gdrive_api.py`）・
+ローカルフォルダ（`src/local_api.py`）の3つで、環境変数 `PF_PHOTO_PROVIDER`（既定 `immich`）で選択する
 （`.claude/plans/abundant-weaving-kernighan.md`）。Immich 単体での挙動・
 キャッシュのファイルパスは抽象化前と一切変わらない。
 
@@ -397,7 +397,7 @@ photo-frame の機能仕様を踏襲する。
 
 ### 7.2. 写真取得元との連携
 
-写真取得元は `PF_PHOTO_PROVIDER` で選択する（`immich`（既定）/ `gdrive`）。
+写真取得元は `PF_PHOTO_PROVIDER` で選択する（`immich`（既定）/ `gdrive` / `local`）。
 
 **Immich 連携**
 
@@ -421,6 +421,31 @@ photo-frame の機能仕様を踏襲する。
     Drive 側の変換に依存するため、変換できない場合は表示されない）。
 *   **撮影日時**: `imageMediaMetadata.time` が無い場合は表示しない（Immich と違い
     ファイルの作成日時にはフォールバックしない）。
+
+**ローカルフォルダ連携**
+
+*   **有効化**: `PF_PHOTO_PROVIDER=local`。写真ルートは `LOCAL_PHOTO_ROOT`
+    （コンテナ内パス。未設定なら `/photos` があればそれ、無ければ `./photos`）。
+    `docker-compose.yml` が `${PF_LOCAL_PHOTO_DIR:-./photos}` を `/photos` へ
+    **読み取り専用**で bind mount する。追加依存は無く、書き込み・削除はしない。
+*   **フォルダ構成**: ルート直下のサブフォルダをアルバムとして扱う（名前順）。
+    ルート直下に画像が直接あれば「未分類」の仮想アルバム（`album.local_root`）を
+    先頭に置く。再帰しない。隠しエントリ（`.` 始まり）とルート外を指す
+    シンボリックリンクは無視する。
+*   **写真ソース**: 指定アルバム / デイリーピックアップのみ（**お気に入りには対応しない**。
+    `supports_favorites = False`）。
+*   **対応形式**: JPEG / PNG / WebP。**HEIC/HEIF はスキップする**（原本のデコードが
+    48MP でピーク約602MB になり実機 RAM で成り立たない。9-11 参照。ローカルには
+    Drive の `thumbnailLink` のような縮小済みの手段が無い）。
+*   **画像の取得**: 原本モード（`delivers_originals = True`）。EXIF の向き補正・
+    画素上限・quality 95 / 4:4:4 は Drive の原本経路と同じ。
+*   **撮影日時**: EXIF `DateTimeOriginal` のみ。無ければ表示しない。
+*   **画素上限**: 形式別（JPEG 40MP / PNG 12MP / WebP 8MP。PNG/WebP は暫定値、9-11 参照）
+    を超える PNG/WebP はデコード前にスキップする（撮影日の読み取りも同じ上限で抑止）。
+*   **更新の反映**: `rescan_on_load = True` のため、写真リストは読み込みのたびに
+    走査し直す（キャッシュが有効期間内でも使わない。失敗・空なら失効キャッシュへ
+    フォールバック）。追加・削除は次の取得（起動・アルバム変更・日付変化）で反映される。
+*   **表紙**: 名前順の先頭画像（JPEG 優先）。`cache_lifetime_hours` 超過で取り直す。
 
 ### 7.3. 画面構成
 
@@ -959,6 +984,21 @@ JPEG/PNG/WebP に限った例外経路として扱う方針**（PR2）を採っ�
 イラストで 93KB→266KB。原本 2.4〜3.9MB よりは十分小さい）。`-l100` 等の
 画質パラメータはほぼ効果が無かった。この結果を受け、`gdrive_api.py` の
 `THUMBNAIL_OVERSAMPLE = 2` で常に2倍要求するようにした。
+
+**形式別の画素上限（暫定）と階層1の実測（x86 の maxrss。実機は未測定）**:
+縮小デコード（`draft()`）を持たない PNG/WebP は全画素をデコードするため、原本の
+画素上限を形式別にした（`photo_cache.py` の `original_pixel_limit()`）。
+JPEG 40MP / PNG・その他 12MP / WebP 8MP。**PNG/WebP の値は下記実測からの見積もりで
+暫定。実機（階層3）で確定させること。**
+
+| 30MP の画像に対する処理 | maxrss の増加（階層1・x86） |
+|---|---|
+| 表紙（JPEG 原本）を `draft()` なしでデコード | +123MB |
+| 同・`draft('RGB',(250,250))` あり | +5MB |
+| PNG の撮影日読み取り（全デコード相当まで進む場合） | +117MB |
+| 同・上限で抑止 | +1MB |
+| PNG 本体 | +129MB（上限超過のためスキップ） |
+| WebP 本体 | +463MB（上限超過のためスキップ） |
 
 **キャッシュ再エンコード時の色差間引き（階層1）**: `photo_cache.py` の JPEG 保存を
 既定（quality=90・4:2:0）のままにすると、イラストの線まわりに色にじみが出る。

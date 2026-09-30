@@ -29,6 +29,10 @@ services:
       - ./config:/config               # settings.json 等の秘匿情報をイメージに焼かない
       - photo-cache:/cache             # named volume。再作成のたびに再ダウンロードしないため
       - /etc/localtime:/etc/localtime:ro  # tzdata を別途入れずローカル時刻にする
+      # ローカルフォルダ取得元（PF_PHOTO_PROVIDER=local）の写真置き場。アプリは読むだけなので
+      # 読み取り専用。Immich 利用時は空ディレクトリが作られるだけで無害。ホスト側に無い
+      # パスは Docker が root 所有で作るので、使うなら先に自分の権限で作っておく
+      - ${PF_LOCAL_PHOTO_DIR:-./photos}:/photos:ro
 
     environment:
       SDL_VIDEODRIVER: kmsdrm
