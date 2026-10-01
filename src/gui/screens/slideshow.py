@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 ZONE_PREV_RATIO = 0.20
 ZONE_NEXT_RATIO = 0.80
 
+# 次の写真が未用意の間、カウントダウンゲージを止める位置（0.0〜1.0）。
+# 右端の手前で止めて「もうすぐ送る」ではなく「次の写真を待っている」ことを示す。
+# 0 に戻してループさせると、送りが近いのか遠いのか分からなくなるため
+PROGRESS_HOLD_RATIO = 0.95
+
 
 class SlideshowScreen:
     """
@@ -33,7 +38,8 @@ class SlideshowScreen:
 
     photo-frame は次の画像を `Event.wait(5)` で待っており、間に合わないと
     メインスレッドが最大5秒固まっていた。ここでは待たず、用意できていなければ
-    その回の送りを見送る。
+    自動送りを保留する（ゲージは PROGRESS_HOLD_RATIO で止め、タイマーは引き直さない）。
+    読み込みが届いた次のフレームで即座に送る。
     """
 
     def __init__(self, renderer: 'Renderer', overlay: 'Overlay',
@@ -86,6 +92,11 @@ class SlideshowScreen:
         # 立っている間は先読みを起こさない（ワーカーの空回りを避ける）。
         # 次の送りのタイミング（request_next）で下ろして最初からやり直す
         self._preload_exhausted = False
+        # 自動送りが次の写真の未用意で保留されているとき、全部失敗で止まった先読みを
+        # やり直す次の時刻（monotonic）。毎フレーム restart しないための間隔制御
+        self._preload_retry_at = 0.0
+        # 「待っています」ログを待ち始めの1回に絞るための印
+        self._waiting_logged = False
         self._stop_event = threading.Event()
         self._threads: list[threading.Thread] = []
 
@@ -158,7 +169,8 @@ class SlideshowScreen:
         self._collect_preloaded()
 
         # フェード中もここで呼ぶ。_last_change が古いままなので比が 1.0 を超え、
-        # クランプされて「満タンのまま維持」になる（ユーザー選択の挙動）
+        # クランプされて「満タンのまま維持」になる（ユーザー選択の挙動）。
+        # 次の写真が未用意でフェード中でないときは PROGRESS_HOLD_RATIO で止まる
         self._overlay.set_progress(self._progress(now))
 
         if self._fading:
@@ -170,7 +182,10 @@ class SlideshowScreen:
 
         interval = float(self._config.get('interval', 10))
         if now - self._last_change >= interval:
-            self.request_next(auto=True)
+            if self._next_tex is not None or now >= self._preload_retry_at:
+                self.request_next(auto=True)
+        else:
+            self._waiting_logged = False
 
     def _progress(self, now: float) -> float | None:
         """
@@ -178,6 +193,8 @@ class SlideshowScreen:
 
         写真が無ければ表示しようがないので None（カウントダウンゲージ非表示の合図）。
         `interval <= 0` は「即座に送る」設定であり満タン扱いにする。
+        フェード中でなく次の写真が未用意のときは PROGRESS_HOLD_RATIO で頭打ちにする
+        （送りを保留して待っている状態の表示。フェード中は従来どおり満タン維持）。
         `_last_change` は自動送り・手動送り・履歴戻り・写真リスト差し替えの
         いずれでも更新済みのため、新しい状態は持たずそのまま流用する。
         """
@@ -187,10 +204,18 @@ class SlideshowScreen:
         if interval <= 0:
             return 1.0
         ratio = (now - self._last_change) / interval
-        return max(0.0, min(1.0, ratio))
+        ratio = max(0.0, min(1.0, ratio))
+        if not self._fading and self._next_tex is None:
+            ratio = min(ratio, PROGRESS_HOLD_RATIO)
+        return ratio
 
     def request_next(self, auto: bool = False) -> None:
-        """ 次の写真へ。用意できていなければ見送る（ブロックしない） """
+        """
+        次の写真へ。用意できていなければ送らない（ブロックしない）。
+
+        自動送りは _last_change を触らず保留する（ゲージは止まり、届いたら即送る）。
+        手動送りは従来どおりタイマーを引き直す。
+        """
         if not self._photos or self._fading:
             return
         if not auto:
@@ -199,12 +224,20 @@ class SlideshowScreen:
                 return
             self._manual_advanced = True
         if self._next_tex is None:
-            if not auto:
+            now = time.monotonic()
+            if auto:
+                # タイマーは戻さない。全部失敗で止まった先読みのやり直し
+                # （Wi-Fi 断からの復旧手段）は interval 間隔で続ける
+                if not self._waiting_logged:
+                    self._waiting_logged = True
+                    logger.info('次の写真の読み込みを待っています')
+                self._preload_retry_at = now + float(self._config.get('interval', 10))
+            else:
                 logger.info('次の写真がまだ用意できていません')
-            # 自動送りで間に合わなかった場合は先読みを促してタイマーを引き直す
-            self._last_change = time.monotonic()
+                self._last_change = now
             self._ensure_preload(restart=True)
             return
+        self._waiting_logged = False
 
         self._history.append(self._index)
         self._index = (self._next_loaded_index if self._next_loaded_index is not None
