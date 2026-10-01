@@ -82,6 +82,41 @@ nohup env DISPLAY=:2 PF_CONFIG_DIR=<スクラッチパッド>/cfg1920 PF_CACHE_D
 -   確認後は Xvfb / x11vnc / websockify とアプリを止める。
     **元からある `:1` / 6080 の環境は止めないこと**
 
+### 写真の読み込み待ちを再現する（階層1）
+
+自動送りの時点で次の写真が用意できていない状態（カウントダウンゲージが
+`PROGRESS_HOLD_RATIO` で止まって待つ）を目視するための手順。Immich の preview は
+速く、空のキャッシュでも普通は間に合ってしまうため、**本番コードを変えずに取得へ遅延を
+差し込むラッパー**から起動する。ラッパーはスクラッチパッドに置き、リポジトリには入れない。
+
+```python
+# <スクラッチパッド>/run_slow.py
+import random, runpy, sys, time
+sys.path.insert(0, '/workspaces/pi-photo-frame')
+import src.photo_source as ps
+_orig = ps.PhotoSource.ensure_photo
+def _slow(self, *a, **k):
+    time.sleep(random.uniform(4, 7))
+    return _orig(self, *a, **k)
+ps.PhotoSource.ensure_photo = _slow
+sys.argv = ['main.py']
+runpy.run_path('/workspaces/pi-photo-frame/main.py', run_name='__main__')
+```
+
+```bash
+# 設定とキャッシュはスクラッチパッドへ分ける（interval を 3 秒程度、省電力を off にしておく）
+export IMMICH_BASE_URL="$(grep -E '^IMMICH_BASE_URL=' .env | cut -d= -f2-)"
+export IMMICH_API_KEY="$(grep -E '^IMMICH_API_KEY=' .env | cut -d= -f2-)"
+export DISPLAY=:1 PF_CONFIG_DIR=<スクラッチパッド>/cfg_vnc PF_CACHE_DIR=<スクラッチパッド>/cache_vnc
+nohup python -u <スクラッチパッド>/run_slow.py > <スクラッチパッド>/app_vnc.log 2>&1 < /dev/null &
+```
+
+-   ログの `次の写真の読み込みを待っています` が送りごとに1回出ていれば待ちが起きている
+-   **`main.py` を import してパッチするのではなく `runpy` で起動する。** `main.py` が後から
+    import する `src.photo_source` は同じモジュールオブジェクトなので、先に差し替えた
+    メソッドがそのまま使われる（`sitecustomize` の import フックより単純で確実）
+-   **`nohup` の行を `&&` で前のコマンドと繋がない**（上と同じ理由）
+
 ## セットアップ
 
 依存はイメージに焼いてあるため、Dev Container では追加作業は要らない。
@@ -192,6 +227,33 @@ gpioinfo | awk '/^gpiochip0/{c=1} c&&/line +18:/{print; exit}'
 稼働中のアプリが line 18 を掴んでいるため、`gpioget` / `gpiomon` は `EBUSY` で失敗する。
 単独で測るときは先に `docker compose stop` すること。ホストの libgpiod は v2.2.1 で
 v1 と CLI 構文が異なる（`gpioget -b pull-down -c gpiochip0 18` のように `-c` でチップを指定する）。
+
+### 写真の読み込み待ちを実機で見る（階層3）
+
+本番コードに手を入れず、**写真本体がキャッシュされていないアルバム**と**短い interval** で
+待ちを起こす。設定は画面から変える（稼働中に `settings.json` を外から書き換えると、
+`ConfigManager` の保存で上書きされうるため）。
+
+1.  **キャッシュの少ないアルバムを写真本体で探す。** `/cache/lists` に写真リストが無くても、
+    写真はデイリーピックアップ経由でキャッシュ済みのことが多い（写真キャッシュはアセット単位で
+    アルバムをまたいで共有される）。アルバムのアセット ID と `/cache/photos` のファイル名を
+    突き合わせる。`/cache/photos` は**アセット ID の先頭2文字のサブディレクトリ**に分かれて
+    いるので `os.walk` で辿り、`photo_fit` の接尾辞（`__smart` / `__cover`）にも注意する
+
+    ```bash
+    ssh "$PF_HOST" 'docker exec pi-photo-frame python -c "import os
+    for r,d,f in os.walk(\"/cache/photos\"):
+        [print(x) for x in f]"' > photos.txt
+    ```
+
+2.  変更前の `source` / `album_id` / `interval` を控えてから、アルバム選択画面でそのアルバムを選び、
+    基本設定画面で **送りの間隔を 1 秒**にする（Immich の preview は速く、10 秒では未キャッシュでも
+    間に合ってしまう）
+3.  `docker compose logs -f` で `次の写真の読み込みを待っています` を見ながら、ゲージを目視する
+4.  **確認後、画面から写真ソースと送りの間隔を元へ戻す**
+
+送りの間隔が数十秒空いて見えたら、まず消灯のログ（`無操作が … 秒続いたため消灯します`）と
+突き合わせること。待ちではなく消灯している区間のことがある。
 
 ## リモート管理 UI（Portainer）
 
