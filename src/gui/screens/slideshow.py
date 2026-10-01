@@ -380,6 +380,9 @@ class SlideshowScreen:
         if not (0 <= index < len(self._photos)):
             return
         asset_id = self._photos[index]['id']
+        # ワーカーから self._photos を触らない（set_photos() で差し替わりうる）ため、
+        # 日付の有無はここで決めておく
+        needs_date = not self._photos[index].get('date')
         self._preloading_index = index
 
         def worker() -> None:
@@ -393,9 +396,17 @@ class SlideshowScreen:
                 # 復旧処理（as_current の場合は次の写真へ進める）に任せる
                 logger.exception('写真の先読み中に例外が発生しました: index=%d', index)
                 path = None
+            # 写真リストに日付が無いときだけ、キャッシュに残した撮影日を引く。
+            # ファイル読みなのでメインスレッドではなくここ（ワーカー）で行う
+            date = ''
+            if path is not None and needs_date:
+                try:
+                    date = self._source.cached_date(asset_id)
+                except Exception:
+                    logger.exception('撮影日の取得中に例外が発生しました: index=%d', index)
             if self._stop_event.is_set():
                 return
-            self._preload_queue.put((index, as_current, path, asset_id))
+            self._preload_queue.put((index, as_current, path, asset_id, date))
 
         thread = threading.Thread(target=worker, name=f'preload-{index}', daemon=True)
         self._threads = [t for t in self._threads if t.is_alive()]
@@ -411,7 +422,7 @@ class SlideshowScreen:
         """
         while True:
             try:
-                index, as_current, path, asset_id = self._preload_queue.get_nowait()
+                index, as_current, path, asset_id, date = self._preload_queue.get_nowait()
             except queue.Empty:
                 return
 
@@ -422,6 +433,11 @@ class SlideshowScreen:
                 # （差し替え時に新しい as_current の読み込みは発行済み）
                 logger.info('旧リストの先読み結果を捨てました: index=%d', index)
                 continue
+
+            if date and not self._photos[index].get('date'):
+                # 取得元の一覧に撮影日が無く、キャッシュに残した値で補う。リスト JSON は
+                # 書き換えず（次回もキャッシュから補える）、メモリ上の1件だけ差し替える
+                self._photos[index] = {**self._photos[index], 'date': date}
 
             if not as_current:
                 # 結果を取り込んだので、この index の先読みはもう飛んでいない。
