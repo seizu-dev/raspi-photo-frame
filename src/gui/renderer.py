@@ -1,5 +1,6 @@
 import logging
 import os
+import time
 from pathlib import Path
 
 import pygame as pg
@@ -27,6 +28,18 @@ TAP_MOVE = 'move'
 # 恒等変換になる。実機の回帰確認の前提。.claude/plans/peaceful-giggling-parrot.md）。
 BASE_WIDTH = 1024
 BASE_HEIGHT = 600
+
+# present() の直前に挟む sleep の秒数。pygame-ce の Renderer.present() は垂直同期を
+# 待つ間 GIL を手放さないとみられ（ソースは未確認。挙動からの推定）、先読み・サムネイル
+# 取得のワーカースレッドは受信のたびに次のフレームまで待たされる。sleep は GIL を
+# 手放すので、その間にワーカーが溜まった受信を処理できる。素直に消すと初回一巡で
+# 先読みが送りの間隔に間に合わなくなる。
+# 実測（階層3、実機 KMSDRM/opengles2、Immich preview 8枚 平均309KB、2026-10-01）:
+# 描画ループなし 0.33秒/枚、ループあり sleep なし 2.83/2.81秒、1ms 1.01/0.93秒、
+# 2ms 0.67/0.65秒、4ms 0.52/0.64秒。fps は全条件 43〜49 で sleep の長さと相関なし。
+# 階層1（x11/llvmpipe、S3 原本 約2.7MB）では sleep なし 13〜57秒 → 1ms で約1秒。
+# 4ms は 1フレーム予算（49.61Hz で約20.2ms）の約2割。fps が落ちる場合は値を下げる。
+PRESENT_YIELD_SEC = 0.004
 
 
 class Renderer:
@@ -252,6 +265,7 @@ class Renderer:
     def present(self) -> None:
         if not self.alive:
             return
+        time.sleep(PRESENT_YIELD_SEC)
         self._renderer.present()
 
     def fill_rect(self, rect: pg.Rect, color: tuple[int, int, int], alpha: int = 255) -> None:
