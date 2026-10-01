@@ -122,11 +122,50 @@ Immich からの画像取得は帯域制約を前提とし、**原寸画像を�
 *   **DRM/framebuffer 直描画**: 最軽量だが UI 実装コストが過大で、クロスフェードが CPU 合成となり性能面のリスクが高い。
 *   **Slint**: 組み込み向けで有望だが、Python バインディングで Pi の KMS 上に載せる実績情報が乏しい。
 
+**S3 互換ストレージ連携**（GCS の XML API で検証。MinIO・R2 等は未検証）
+
+*   **有効化**: `PF_PHOTO_PROVIDER=s3`。`S3_ENDPOINT_URL` / `S3_BUCKET` /
+    `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` が必須、`S3_PREFIX`（ルート。末尾 `/`）と
+    `S3_REGION`（既定 `auto`）は任意。**追加依存は無い**（SigV4 署名は `hmac` / `hashlib`、
+    通信は `requests`）。**GET のみ・path-style（`<endpoint>/<bucket>/<key>`）のみ**で、
+    仮想ホスト形式は実装しない。
+*   **フォルダ構成**: `ListObjectsV2`（`delimiter=/`）の共通プレフィックスをアルバムとして扱う
+    （名前順）。ルート直下に画像が直接あれば「未分類」（`album.s3_root`）を先頭に置く。
+    再帰しない。`/` で終わるサイズ0のフォルダ用オブジェクト（コンソールで作ったフォルダ）
+    と `.` 始まりの名前は除外する。
+*   **写真ソース**: 指定アルバム / デイリーピックアップのみ（`supports_favorites = False`）。
+*   **対応形式・画像の取得**: ローカルと同じ（JPEG / PNG / WebP。HEIC/HEIF はスキップ。
+    原本モードで、形式別の画素上限・EXIF の向き補正・quality 95 / 4:4:4）。原本は
+    ストリーミングで取得し 40MB を超えたら中断する。
+    40MB 超で弾いたキーはプロセス内で記憶し再取得しない。**画素上限で弾かれた原本は
+    一巡ごとに再取得される（既知の制約。判定が `photo_cache` 側で取得元から見えないため）。**
+*   **アセット ID**: ローカルと同じ形式（ETag 由来8文字 + キーの base64、長いキーはハッシュ +
+    プロセス内の対応表）。オブジェクトを差し替えると ETag が変わりキャッシュキーも変わる。
+    符号化は `src/provider_util.py` に共用部品として置く。
+*   **署名とクエリ**: requests の `params=` は使わず、署名の正規化と同じ符号化（空白は `%20`）で
+    URL を自前で組む（`params=` だと空白が `+` で送られ、空白を含むキーで署名が合わない）。
+    アクセスキー・署名・Authorization ヘッダ・バケット名はログに出さない
+    （エラー応答は `<Code>` だけ拾う）。
+*   **更新の反映**: `rescan_on_load = False`（通信が高価なため Immich / Drive と同じ）。
+    写真リストは `cache_lifetime_hours` の間キャッシュされ、追加した写真は失効後に反映される。
+    通信エラーは `ProviderError` で、失効キャッシュへフォールバックする。
+*   **撮影日時**: 一覧では分からない（原本を開かないと読めない）ため、**キャッシュ作成時に
+    原本の EXIF `DateTimeOriginal` を読み、`<asset_id>.date`（ISO 文字列）という補助ファイルを
+    写真本体と同じディレクトリへ残す**。`PhotoCache.get_cached_date()` で読み、
+    スライドショーの先読みワーカーが写真リストの `date` が空のときだけ引いて補う
+    （リスト JSON は書き換えない）。`originals=False`（Immich）では作らない。
+    `.date` は容量計算・LRU の対象外で、上限削除で写真が消えたときに孤児を掃除する。
+    PNG は `info['exif']` だけを読み、`getexif()` による全画素デコードを避ける。
+    先読みが間に合わない初回は日付が出ないことがある。
+*   **表紙**: 名前順の先頭画像（JPEG 優先）。`cache_lifetime_hours` 超過で取り直す。
+*   **外向き通信の課金**: クラウド側のダウンロードには egress 料金がかかりうる。
+    写真は原本を一度取得してキャッシュするが、利用前に料金表を確認すること。
+
 ### 3.3. 主要ライブラリ
 
 **写真取得元は `src/photo_provider.py` の `PhotoProvider` Protocol で抽象化している。**
 実装済みは Immich（`src/immich_api.py`）・Google Drive（`src/gdrive_api.py`）・
-ローカルフォルダ（`src/local_api.py`）の3つで、環境変数 `PF_PHOTO_PROVIDER`（既定 `immich`）で選択する
+ローカルフォルダ（`src/local_api.py`）・S3 互換ストレージ（`src/s3_api.py`）の4つで、環境変数 `PF_PHOTO_PROVIDER`（既定 `immich`）で選択する
 （`.claude/plans/abundant-weaving-kernighan.md`）。Immich 単体での挙動・
 キャッシュのファイルパスは抽象化前と一切変わらない。
 
@@ -397,7 +436,7 @@ photo-frame の機能仕様を踏襲する。
 
 ### 7.2. 写真取得元との連携
 
-写真取得元は `PF_PHOTO_PROVIDER` で選択する（`immich`（既定）/ `gdrive` / `local`）。
+写真取得元は `PF_PHOTO_PROVIDER` で選択する（`immich`（既定）/ `gdrive` / `local` / `s3`）。
 
 **Immich 連携**
 

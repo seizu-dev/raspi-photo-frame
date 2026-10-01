@@ -16,7 +16,7 @@ pipeline were both worked backwards from that limit.
 ## Features
 
 - Pulls photos from an Immich album, your favorites, or a daily pickup rotation
-  (a shared Google Drive folder works too — see the appendix below)
+  (a shared Google Drive folder, a local folder, or S3-compatible storage work too — see the appendices below)
 - Four transition effects (crossfade, fade to black, slide, wipe) plus random selection
 - Three ways to fit a photo to the screen (contain, cover, or cover only when the
   orientation matches)
@@ -381,6 +381,43 @@ Add or remove photos on the host side (`scp` / `rsync` / a Samba share, etc.).
 
 The reasons for the per-format limits are in section 9-11 of
 [SPECIFICATION.md](SPECIFICATION.md).
+
+## Appendix: Using S3-compatible storage as the photo source
+
+Instead of Immich, the app can show photos from an S3-compatible object store.
+Folders under a bucket (or a prefix inside it) are read as albums.
+
+### Setup
+
+1. Put photos in a bucket, one folder per album.
+2. Set these in `.env` (see `.env.sample`):
+
+   ```bash
+   PF_PHOTO_PROVIDER=s3
+   S3_ENDPOINT_URL=<endpoint URL>
+   S3_BUCKET=<your bucket>
+   S3_PREFIX=photos/            # optional, with a trailing slash
+   S3_ACCESS_KEY_ID=<access key>
+   S3_SECRET_ACCESS_KEY=<secret key>
+   # S3_REGION=auto             # default
+   ```
+
+3. Restart with `docker compose up -d`.
+
+### Folder layout
+
+- Each folder directly under the bucket (or under `S3_PREFIX`) is one album.
+- Photos placed directly there are grouped into a single virtual "Unsorted" album.
+- Only the immediate contents of a folder are read; deeper nesting is ignored.
+
+### Limitations
+
+- Supported formats: JPEG, PNG, WebP. HEIC/HEIF and images that are too large are
+  not shown.
+- There is no "favorites" source — only album and daily-pickup selection are available.
+- The capture date is shown only when the photo has it in EXIF.
+- Photos added to the bucket appear after the cached photo list expires.
+- Only path-style URLs (`<endpoint>/<bucket>/<key>`) are supported.
 
 ## License
 

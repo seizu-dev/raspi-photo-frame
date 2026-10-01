@@ -122,6 +122,12 @@ src/
                             （thumbnailLink）を優先し、原本は例外経路として扱う
   local_api.py              ローカルフォルダを写真取得元にする PhotoProvider 実装
                             （新規。サブフォルダ＝アルバム。原本モード。HEIC は扱わない）
+  s3_api.py                 S3 互換ストレージ（GCS の XML API 等）を写真取得元にする
+                            PhotoProvider 実装（新規。path-style・GET のみ。SigV4 署名は
+                            hmac/hashlib で自前。local と同じ ID 形式・原本モード）
+  provider_util.py          local_api / s3_api / photo_cache が共用する部品（ID の
+                            base64・ハッシュ、EXIF の撮影日の解析。他の自作モジュールを
+                            import しない）
   photo_cache.py            表示解像度確定済み画像のディスクキャッシュ（再設計。
                             取得元ごとに namespace でサブディレクトリを分ける）
   photo_source.py           provider とキャッシュを繋ぐ層（新規。フォールバックと表示順。
@@ -414,6 +420,37 @@ src/
     -   `PF_PHOTO_PROVIDER` 環境変数 ↔ `photo_provider.py` の `create_provider()` の
         分岐 ↔ `.env.sample` のコメント ↔ README の資格情報節（`GDRIVE_SA_KEY_FILE` /
         `GDRIVE_ROOT_FOLDER_ID` を含む）
+    -   `PF_PHOTO_PROVIDER=s3` ↔ `photo_provider.py` の `create_provider()` の `'s3'` 分岐
+        （遅延 import）↔ `.env.sample` の S3 節（`S3_ENDPOINT_URL` / `S3_BUCKET` /
+        `S3_PREFIX` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `S3_REGION`）↔
+        README 2本の「番外: S3 互換ストレージ」↔ SPECIFICATION.md 7.2。
+        `rescan_on_load = False`（Drive と同じ。写真リストは `cache_lifetime_hours` に従う）。
+        i18n の `album.s3_root` も `name_key` 契約に乗る（`is_virtual` は付けない）
+        40MB 超の原本は `_oversized` に記憶して再取得しない（Drive の `_skipped_originals` と同形）。
+        **画素上限で弾かれた原本は一巡ごとに再取得される（既知の制約。判定が `photo_cache` 側で
+        取得元から見えないため）**
+    -   **`requests` の `params=` を使わない**（`s3_api.py` の `_get()`）。requests は空白を
+        `+` で送るが SigV4 の正規化は `%20` のため、空白を含むキー
+        （例: `photos/my trip/`）で署名が合わなくなる。URL のパスとクエリは
+        `canonical_query()` / `quote()` で署名と同じ符号化で自前に組む。
+        **コンソールで作ったフォルダのサイズ0の `<prefix>/` オブジェクトは
+        `_list()` で除外する**（除外しないとアルバム直下の「画像」として数えられる）
+    -   `src/provider_util.py`（`b64e` / `b64d` / `display_name` / `sha_prefix` /
+        `parse_exif_date`）↔ `local_api.py` / `s3_api.py` / `photo_cache.py`。
+        **アセット ID の形式はキャッシュのファイル名になる**ため、local と s3 で形式が
+        ずれないよう共用し複製しない。`parse_exif_date()` は `info['exif']` のバイト列を
+        受ける契約（`getexif()` は PNG で全画素をデコードする）
+    -   **`.date` 補助ファイル**（撮影日。`originals=True` の取得元で、一覧に日付が無いもの
+        =S3 用）: `photo_cache.py` の `store_photo()`（JPEG を書けたあとに
+        `<asset_id>.date` を原子的に書く。日付が無ければ作らない）/ `get_cached_date()`
+        （mtime を触らない）↔ **`_scan_and_trim()` 内の孤児掃除 `_sweep_orphan_dates()`**
+        （写真が削除されたときだけ、対応する `<id>*.jpg` が1つも無い `.date` を消す。
+        `.date` は `*.jpg` の走査に入らず容量計算に影響しない）↔
+        `photo_source.cached_date()` ↔ `slideshow.py` の `_request_load()` のワーカーでの
+        読み取り（メインスレッドでファイルを読まない）と `_collect_preloaded()` での補完
+        （`date` が空のときだけ。リスト JSON は書き換えない）。
+        **`originals=False`（Immich）では作らず、出力はバイト単位で不変。**
+        片方だけ変えると、日付が出ない・孤児が溜まり続ける・Immich の表示が変わる
     -   `PF_PHOTO_PROVIDER=local` ↔ `local_api.py` の `LOCAL_PHOTO_ROOT`
         （未設定なら `/photos`、無ければ `./photos`）↔ `docker-compose.yml` の
         `${PF_LOCAL_PHOTO_DIR:-./photos}:/photos:ro` の bind mount ↔ `.env.sample` の

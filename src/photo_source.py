@@ -217,3 +217,11 @@ class PhotoSource:
         if raw is None:
             return None
         return self.cache.store_photo(asset_id, raw)
+
+    def cached_date(self, asset_id: str) -> str:
+        """
+        キャッシュ作成時に原本の EXIF から残した撮影日（ISO 文字列。無ければ空文字）。
+        写真リストに日付を持たない取得元（S3 等。一覧では原本を開けない）の表示用。
+        ファイルを読むため、`ensure_photo()` と同じくワーカースレッドから呼ぶこと。
+        """
+        return self.cache.get_cached_date(asset_id)

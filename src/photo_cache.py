@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from src.provider_util import ISO_DATE_FORMAT, parse_exif_date
+
 if TYPE_CHECKING:
     from src.config_manager import ConfigManager
 
@@ -56,6 +58,9 @@ _warned_fit_values: set[str] = set()
 # mtime を LRU の代用にする。relatime の環境では atime が更新されないため。
 # SD カードの書き込みを抑えるため、前回更新からこの秒数が経つまで touch しない。
 UTIME_MIN_INTERVAL_SEC = 3600
+
+# 撮影日の補助ファイルの拡張子。`*.jpg` の走査（容量計算・LRU）に入らないよう別にする
+DATE_SUFFIX = '.date'
 
 # 容量の実走査は保存のたびには行わない（数千ファイルの stat がスライド表示を妨げるため）
 ENFORCE_EVERY_N_STORES = 20
@@ -346,7 +351,8 @@ class PhotoCache:
         ズレ（違う方式でエンコードしたのに別の方式のファイル名で保存する等）を防ぐ。
         """
         fit = self._resolve_fit_setting()
-        data = self._encode_jpeg(raw, self.display_size, fit)
+        meta: dict[str, str] = {}
+        data = self._encode_jpeg(raw, self.display_size, fit, meta=meta)
         if data is None:
             return None
 
@@ -354,9 +360,34 @@ class PhotoCache:
         if not self._write_atomic(path, data):
             return None
 
+        # 撮影日は JPEG を書けたあとに残す（孤児を作らない順序）。fit によらず
+        # 写真1枚につき1つなので、方式ごとのファイルとは別に持つ
+        date = meta.get('date', '')
+        if date:
+            self._write_atomic(self._date_path(asset_id), date.encode('ascii'))
+
         logger.info('写真をキャッシュしました: %s (%d KB)', asset_id, len(data) // 1024)
         self._schedule_enforce()
         return path
+
+    def _date_path(self, asset_id: str) -> Path:
+        """ 撮影日の補助ファイル。写真本体（`_photo_path`）と同じディレクトリに置く """
+        name = _safe_name(asset_id)
+        return self.photos_dir / name[:2] / f'{name}{DATE_SUFFIX}'
+
+    def get_cached_date(self, asset_id: str) -> str:
+        """
+        キャッシュ作成時に原本の EXIF から残した撮影日（ISO 文字列）を返す。
+        無い・壊れているときは空文字。小さな1ファイルを読むだけだが I/O なので
+        メインスレッドからは呼ばない（slideshow はワーカーから呼ぶ）。
+        mtime は更新しない（写真本体の LRU に影響させないため）。
+        """
+        try:
+            text = self._date_path(asset_id).read_text(encoding='ascii').strip()
+            datetime.strptime(text, ISO_DATE_FORMAT)
+        except (OSError, ValueError):
+            return ''
+        return text
 
     # ------------------------------------------------------------ 写真リスト（JSON）
 
@@ -575,16 +606,53 @@ class PhotoCache:
 
             entries.sort()  # mtime 昇順 = 最後に使われたのが古い順
             removed = 0
+            deleted: set[Path] = set()
             for _, size, path in entries:
                 if total <= limit:
                     break
                 if self._unlink(path, 'キャッシュ上限超過'):
                     total -= size
                     removed += 1
+                    deleted.add(path)
+
+            if deleted:
+                self._sweep_orphan_dates([p for _, _, p in entries if p not in deleted])
 
             logger.info('キャッシュ上限 %dMB を超えたため %d 件削除しました（残 %.1fMB）',
                         limit_mb, removed, total / 1024 / 1024)
             return removed
+
+    def _sweep_orphan_dates(self, surviving_jpgs: list[Path]) -> None:
+        """
+        対応する写真（`<id>.jpg` / `<id>__cover.jpg` / `<id>__smart.jpg`）が1つも
+        残っていない `.date` を消す。`.date` は容量計算に入らないため、写真だけが
+        削除されると放っておけば溜まり続ける。
+
+        写真が削除されたときにだけ呼ぶ（上限が 0=無制限の経路は元から何も削除しない
+        ので、この掃除も要らない。孤児が生まれるのは削除のときだけ）。
+        残存側は走査済みのパス一覧から組むので、追加の stat はしない。
+        `.date` は写真と同じディレクトリにあるため、(ディレクトリ, 基底名) で突き合わせる
+        （取得元ごとの namespace が違えば同じ ID でも別物）。
+        """
+        alive: set[tuple[Path, str]] = set()
+        for jpg in surviving_jpgs:
+            stem = jpg.stem
+            alive.add((jpg.parent, stem))
+            for suffix in _FIT_SUFFIXES.values():
+                if suffix and stem.endswith(suffix):
+                    alive.add((jpg.parent, stem[:-len(suffix)]))
+        swept = 0
+        for date_file in self._photos_root.rglob(f'*{DATE_SUFFIX}'):
+            if (date_file.parent, date_file.stem) not in alive:
+                # 走査後に保存された写真（先読みワーカー）の .date を消さないよう、
+                # 消す直前に対応する写真が今あるかを候補だけ stat して確かめる
+                if any((date_file.parent / f'{date_file.stem}{sfx}.jpg').exists()
+                       for sfx in _FIT_SUFFIXES.values()):
+                    continue
+                if self._unlink(date_file, '孤児の撮影日ファイル'):
+                    swept += 1
+        if swept:
+            logger.info('対応する写真の無い撮影日ファイルを %d 件削除しました', swept)
 
     def get_total_size(self) -> int:
         """ 写真本体の総バイト数を返す（設定画面での表示用。取得元をまたいで合算する） """
@@ -681,7 +749,8 @@ class PhotoCache:
         return img
 
     def _encode_jpeg(self, raw: bytes | Path, max_size: tuple[int, int] | None,
-                     fit: str = FIT_CONTAIN) -> bytes | None:
+                     fit: str = FIT_CONTAIN,
+                     meta: dict[str, str] | None = None) -> bytes | None:
         """
         画像を JPEG バイト列へ変換する。max_size が指定されていれば表示解像度へ確定させる。
 
@@ -700,6 +769,10 @@ class PhotoCache:
         EXIF Orientation に応じた `exif_transpose` と画素上限チェックを行う
         （**Immich 経路には一切掛けない**。Immich の preview は既に正しい向きで
         返るため、二重回転の恐れがある）。
+
+        `meta` を渡すと、原本モードの写真本体（max_size 指定あり）に限り、原本の
+        EXIF の撮影日を `meta['date']`（ISO 文字列）へ入れる。出力のバイト列には
+        影響しない（Immich 経路は meta を渡されても何も入れない）。
         """
         global _WEBP_DIRECT_AVAILABLE
         source = raw if isinstance(raw, Path) else BytesIO(raw)
@@ -731,6 +804,16 @@ class PhotoCache:
                             '原本の画素数が上限を超えているためスキップします: %s %dx%d (上限 %dMP)',
                             img.format, px_w, px_h, px_limit // 1_000_000)
                         return None
+                    if meta is not None and max_size:
+                        # info['exif'] のバイト列だけを読む（getexif() は PNG で全画素を
+                        # デコードする）。WebP の直接経路は元画像を閉じる前のここで読む。
+                        # 画素上限は上で判定済み。IDAT の後ろにある PNG の eXIf は読めず空
+                        exif_raw = img.info.get('exif')
+                        if exif_raw:
+                            try:
+                                meta['date'] = parse_exif_date(exif_raw)
+                            except Exception as e:  # noqa: BLE001 - 日付の失敗で写真を落とさない
+                                logger.debug('撮影日を読めませんでした: %s', type(e).__name__)
                     try:
                         orientation = img.getexif().get(0x0112)
                     except (AttributeError, KeyError, TypeError, ValueError, OSError) as e:
@@ -791,7 +874,7 @@ class PhotoCache:
                         # 以後は使わない（上限も 4MP へ下がる）。通常経路でやり直す
                         # （_DECODE_LOCK は RLock のため再入できる）。
                         _WEBP_DIRECT_AVAILABLE = False
-                        return self._encode_jpeg(raw, max_size, fit)
+                        return self._encode_jpeg(raw, max_size, fit, meta=meta)
                     direct_img = self._shrink_then_rotate(decoded, orientation, max_size, fit)
                     del decoded
                 if direct_img is not None:

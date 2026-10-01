@@ -18,14 +18,11 @@ EXIF を読むが、画素はデコードしない）。
 **ファイルは読み取り専用で扱い、書き込み・削除はしない。** 追加依存は無い。
 """
 
-import base64
 import binascii
-import hashlib
 import logging
 import os
 import threading
 import warnings
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
@@ -33,6 +30,11 @@ from PIL import Image, UnidentifiedImageError
 
 from src.photo_cache import original_pixel_limit
 from src.photo_provider import ProviderError
+from src.provider_util import b64d as _b64d
+from src.provider_util import b64e as _b64e
+from src.provider_util import display_name as _display
+from src.provider_util import parse_exif_date
+from src.provider_util import sha_prefix as _sha
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +57,6 @@ MAX_ID_LEN = 120
 # 相対パスを base64 で ID へ埋める上限（超えたらハッシュ＋対応表へ倒す）
 MAX_EMBED_B64_LEN = 96
 
-EXIF_IFD_POINTER = 0x8769
-EXIF_DATETIME_ORIGINAL = 0x9003
-
 
 def resolve_photo_root() -> Path:
     """ 写真ルートを解決する。LOCAL_PHOTO_ROOT > /photos（存在すれば） > ./photos """
@@ -67,30 +66,6 @@ def resolve_photo_root() -> Path:
     if Path(DEFAULT_CONTAINER_ROOT).is_dir():
         return Path(DEFAULT_CONTAINER_ROOT)
     return Path(DEFAULT_DEV_ROOT)
-
-
-def _b64e(text: str) -> str:
-    raw = text.encode('utf-8', 'surrogateescape')
-    return base64.urlsafe_b64encode(raw).decode('ascii').rstrip('=')
-
-
-def _b64d(token: str) -> str:
-    pad = '=' * (-len(token) % 4)
-    return base64.urlsafe_b64decode(token + pad).decode('utf-8', 'surrogateescape')
-
-
-def _display(text: str) -> str:
-    """
-    表示・ログ用の名前へ直す。非 UTF-8 のファイル名は surrogateescape の孤立
-    サロゲートを含み、そのまま写真リスト JSON や settings.json へ書くと
-    UnicodeEncodeError で途中までしか書けない。ID（base64）は元のバイト列のまま
-    なので、ここで置換文字にするのは表示名だけ。
-    """
-    return text.encode('utf-8', 'surrogateescape').decode('utf-8', 'replace')
-
-
-def _sha(text: str, n: int) -> str:
-    return hashlib.sha1(text.encode('utf-8', 'surrogateescape')).hexdigest()[:n]
 
 
 class LocalFolderAPI:
@@ -325,20 +300,9 @@ class LocalFolderAPI:
                     raw = img.info.get('exif')
                     if not raw:
                         return ''
-                    exif = Image.Exif()
-                    exif.load(raw)
-                    value = exif.get_ifd(EXIF_IFD_POINTER).get(EXIF_DATETIME_ORIGINAL)
+                    return parse_exif_date(raw)
         except Exception as e:  # noqa: BLE001 - 1枚の失敗で一覧を落とさない
             logger.debug('撮影日を読めませんでした: %s (%s)', _display(path.name), type(e).__name__)
-            return ''
-        if not value:
-            return ''
-        if isinstance(value, bytes):
-            value = value.decode('ascii', 'ignore')
-        try:
-            return datetime.strptime(str(value).strip('\x00 '),
-                                     '%Y:%m:%d %H:%M:%S').strftime('%Y-%m-%dT%H:%M:%S')
-        except ValueError:
             return ''
 
     # ------------------------------------------------------ PhotoProvider Protocol

@@ -38,7 +38,7 @@ class PhotoProvider(Protocol):
     """
     写真取得元が満たすべき契約。
 
-    - `name`: 'immich' | 'gdrive' | 'local'。ログや `active_provider`
+    - `name`: 'immich' | 'gdrive' | 'local' | 's3'。ログや `active_provider`
       （実行時状態。`config_manager.py` の既定値）に使う短い識別子
     - `cache_namespace`: `PhotoCache` がサブディレクトリを分けるための名前。
       Immich は既存キャッシュを温存するため空文字（`PhotoCache` は名前空間なしと
@@ -130,6 +130,11 @@ def create_provider(config: 'ConfigManager',
         # 追加依存は無いが、他の取得元と書きぶりを揃えて遅延 import する
         from src.local_api import LocalFolderAPI
         return LocalFolderAPI(config, status_callback=status_callback)
+
+    if provider_name == 's3':
+        # 追加依存は無い（requests と標準ライブラリだけ）が、書きぶりを揃えて遅延 import する
+        from src.s3_api import S3API
+        return S3API(config, status_callback=status_callback)
 
     raise ValueError(f'未知の PF_PHOTO_PROVIDER です: {provider_name!r}')
 
