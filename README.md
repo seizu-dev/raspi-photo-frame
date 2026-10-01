@@ -384,57 +384,40 @@ The reasons for the per-format limits are in section 9-11 of
 
 ## Appendix: Using S3-compatible storage as the photo source
 
-Instead of Immich, the app can show photos from an S3-compatible object store
-(Google Cloud Storage via its S3-compatible XML API, MinIO, Cloudflare R2, ...).
-Only Google Cloud Storage has been tried. Folders under a bucket (or a prefix inside
-it) are read as albums.
+Instead of Immich, the app can show photos from an S3-compatible object store.
+Folders under a bucket (or a prefix inside it) are read as albums.
 
-### Setup (Google Cloud Storage)
+### Setup
 
 1. Put photos in a bucket, one folder per album.
-2. Create a service account and give it read access to the bucket (it must be able to
-   list and read objects). Note that HMAC keys inherit the permissions of the service
-   account they are tied to.
-3. Create an HMAC key for that service account: in the Cloud Storage console, open
-   **Settings**, then the **Interoperability** tab, then **Create a key for a service
-   account**. The secret is shown only once. (You need `storage.hmacKeys.*` permissions
-   for the project to do this.)
-4. Set these in `.env` (see `.env.sample`):
+2. Set these in `.env` (see `.env.sample`):
 
    ```bash
    PF_PHOTO_PROVIDER=s3
-   S3_ENDPOINT_URL=https://storage.googleapis.com
+   S3_ENDPOINT_URL=<endpoint URL>
    S3_BUCKET=<your bucket>
    S3_PREFIX=photos/            # optional, with a trailing slash
-   S3_ACCESS_KEY_ID=<HMAC access key>
-   S3_SECRET_ACCESS_KEY=<HMAC secret>
+   S3_ACCESS_KEY_ID=<access key>
+   S3_SECRET_ACCESS_KEY=<secret key>
    # S3_REGION=auto             # default
    ```
 
-5. Restart with `docker compose up -d`.
-
-Only path-style URLs (`<endpoint>/<bucket>/<key>`) are supported.
+3. Restart with `docker compose up -d`.
 
 ### Folder layout
 
 - Each folder directly under the bucket (or under `S3_PREFIX`) is one album.
-- Photos placed directly there are grouped into a virtual "Unsorted" album.
+- Photos placed directly there are grouped into a single virtual "Unsorted" album.
 - Only the immediate contents of a folder are read; deeper nesting is ignored.
 
 ### Limitations
 
-- Supported formats: JPEG, PNG, WebP. HEIC/HEIF are skipped, and so are files over
-  the per-format pixel limits and originals over 40 MB (same reasons as the local
-  folder; there is no server-side downsizing).
-- There is no "favorites" source — only album and daily-pickup selection.
-- The photo list is cached for `cache_lifetime_hours`, so photos you add to the
-  bucket appear after the cache expires.
-- The capture date comes from the original's EXIF and is read when the photo is
-  cached. It is therefore missing for a photo until it has been downloaded, and may
-  not show on the first pass if the next photo was not ready in time.
-- **Every photo is downloaded as the original. Downloading from a cloud provider can
-  incur egress charges, so check the provider's current pricing before using it.**
-  Photos are downloaded once and then served from the local cache.
+- Supported formats: JPEG, PNG, WebP. HEIC/HEIF and images that are too large are
+  not shown.
+- There is no "favorites" source — only album and daily-pickup selection are available.
+- The capture date is shown only when the photo has it in EXIF.
+- Photos added to the bucket appear after the cached photo list expires.
+- Only path-style URLs (`<endpoint>/<bucket>/<key>`) are supported.
 
 ## License
 
