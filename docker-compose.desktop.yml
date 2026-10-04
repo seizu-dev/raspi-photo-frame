@@ -1,15 +1,6 @@
-# Linux デスクトップ（X11 セッション）の画面へコンテナから直接表示する構成。
-# VNC を経由しないため描画がカクつかない。本番用の docker-compose.yml とは独立した
-# ファイルで、こちらを変更しても本番構成には影響しない。
-#
+# Linux デスクトップ（X11）へコンテナから直接表示する開発用構成。本番構成とは独立
 #   docker compose -f docker-compose.desktop.yml up --build
-#
-# runtime ステージは KMSDRM / GLES2 用で x86 の OpenGL ドライバ（libgl1-mesa-dri）を
-# 持たないため、dev ステージを使う。ソースは COPY せず bind mount する。
-# X への接続はホストの xhost（SI:localuser:<uid 1000 のユーザー>）で許可される前提。
-# 拒否される場合はホストで `xhost +SI:localuser:$(id -un)` を実行する。
-# docker-compose.yml と同じプロジェクト名・サービス名だと本番構成のコンテナを
-# 置き換えてしまうため、プロジェクト名を分ける
+# X の接続許可はホストで `xhost +SI:localuser:$(id -un)`
 name: raspi-photo-frame-desktop
 
 services:
@@ -17,9 +8,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      target: dev
-    # build: . の docker-compose.yml と違い GHCR の名前で上書きタグ付けしないよう別名にする
-    image: raspi-photo-frame:desktop
+      target: dev  # runtime は x86 の OpenGL ドライバを持たない
+    image: raspi-photo-frame:desktop  # GHCR の名前で上書きタグ付けしないよう別名
     init: true
     user: "1000:1000"
     group_add:
@@ -28,20 +18,17 @@ services:
     devices:
       - /dev/dri:/dev/dri
     volumes:
-      - .:/workspaces/pi-photo-frame
+      - .:/workspaces/pi-photo-frame  # ソースは COPY せず bind mount
       - /tmp/.X11-unix:/tmp/.X11-unix:ro
       - /etc/localtime:/etc/localtime:ro
     environment:
       DISPLAY: ${DISPLAY:-:0}
-      # dev ステージの ENV と同じ値。IS_DEV_ENVIRONMENT=true で DRM DPMS と GPIO を使わず、
-      # 消灯時は黒い復帰待ちウィンドウになる（クリックで復帰）
       SDL_VIDEODRIVER: x11
       SDL_RENDER_DRIVER: opengl
-      SDL_VIDEO_X11_XRANDR: "0"
-      IS_DEV_ENVIRONMENT: "true"
+      SDL_VIDEO_X11_XRANDR: "0"  # XRandR のモードと画面の論理サイズが違う環境で全画面が欠けるため
+      IS_DEV_ENVIRONMENT: "true" # DPMS / GPIO を使わず、消灯時は復帰待ちウィンドウになる
       PYTHONUNBUFFERED: "1"
-      # PF_CONFIG_DIR / PF_CACHE_DIR は設定しない。Dev Container と同じく
-      # ワークスペースの ./config / ./cache を使う
+      # PF_CONFIG_DIR / PF_CACHE_DIR は設定せず ./config / ./cache を使う
     env_file:
       - .env
     command: ["python", "main.py"]
