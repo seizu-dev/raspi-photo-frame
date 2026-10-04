@@ -1,0 +1,34 @@
+# Windows（WSL2 + WSLg）へコンテナから直接表示する開発用構成。Docker Desktop 用。本番構成とは独立
+#   docker compose -f docker-compose.wsl.yml up --build
+# マウント元は Docker Desktop の VM から見たパス。合わなければ .env の PF_* で上書きする
+# WSLC へ移るときは、ソースを Windows パスに、GPU を CDI（microsoft.com/wslc=gpu）に置き換える
+name: raspi-photo-frame-wsl
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev  # runtime は x86 の OpenGL ドライバ（d3d12 を含む）を持たない
+    image: raspi-photo-frame:wsl  # GHCR の名前で上書きタグ付けしないよう別名
+    init: true
+    user: "1000:1000"
+    devices:
+      - /dev/dxg:/dev/dxg  # WSL の GPU。誰でも読み書きできるので group_add は不要
+    volumes:
+      - ${PF_WORKSPACE_DIR:-.}:/workspaces/pi-photo-frame  # ソースは COPY せず bind mount
+      - ${PF_WSLG_DIR:-/run/desktop/mnt/host/wslg}/.X11-unix:/tmp/.X11-unix:ro
+      - ${PF_WSL_LIB_DIR:-/usr/lib/wsl}:/usr/lib/wsl:ro  # d3d12 が読む libd3d12.so 等
+    environment:
+      DISPLAY: ":0"
+      SDL_VIDEODRIVER: x11
+      SDL_RENDER_DRIVER: opengl
+      IS_DEV_ENVIRONMENT: "true"  # DPMS / GPIO を使わず、消灯時は復帰待ちウィンドウになる
+      PYTHONUNBUFFERED: "1"
+      LD_LIBRARY_PATH: /usr/lib/wsl/lib
+      GALLIUM_DRIVER: d3d12
+      TZ: ${TZ:-Asia/Tokyo}  # /etc/localtime をマウントしない（WSLC でもそのまま使えるように）
+      # PF_CONFIG_DIR / PF_CACHE_DIR は設定せず ./config / ./cache を使う
+    env_file:
+      - .env
+    command: ["python", "main.py"]

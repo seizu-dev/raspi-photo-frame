@@ -1,0 +1,34 @@
+# Linux デスクトップ（X11）へコンテナから直接表示する開発用構成。本番構成とは独立
+#   docker compose -f docker-compose.desktop.yml up --build
+# X の接続許可はホストで `xhost +SI:localuser:$(id -un)`
+name: raspi-photo-frame-desktop
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev  # runtime は x86 の OpenGL ドライバを持たない
+    image: raspi-photo-frame:desktop  # GHCR の名前で上書きタグ付けしないよう別名
+    init: true
+    user: "1000:1000"
+    group_add:
+      - "${GID_VIDEO:-44}"   # video  -> /dev/dri/card*
+      - "${GID_RENDER:-992}" # render -> /dev/dri/renderD128（GPU による OpenGL）
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - .:/workspaces/pi-photo-frame  # ソースは COPY せず bind mount
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      DISPLAY: ${DISPLAY:-:0}
+      SDL_VIDEODRIVER: x11
+      SDL_RENDER_DRIVER: opengl
+      SDL_VIDEO_X11_XRANDR: "0"  # XRandR のモードと画面の論理サイズが違う環境で全画面が欠けるため
+      IS_DEV_ENVIRONMENT: "true" # DPMS / GPIO を使わず、消灯時は復帰待ちウィンドウになる
+      PYTHONUNBUFFERED: "1"
+      # PF_CONFIG_DIR / PF_CACHE_DIR は設定せず ./config / ./cache を使う
+    env_file:
+      - .env
+    command: ["python", "main.py"]
