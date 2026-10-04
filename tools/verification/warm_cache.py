@@ -99,8 +99,8 @@ def main() -> int:
     logger.info('写真取得元: %s', provider.name)
 
     # main.py と同様、実際にキャッシュを焼くサイズ（--display-size / 既定値）を
-    # provider に伝える。thumbnailLink の要求寸法の計算に使う（Drive のみ。
-    # 持たない provider には無視してよい任意メソッド）
+    # provider に伝える。thumbnailLink の要求寸法の計算（Drive）と fullsize 取り直しの
+    # 判定（Immich）に使う（持たない provider には無視してよい任意メソッド）
     set_display_size = getattr(provider, 'set_display_size', None)
     if callable(set_display_size):
         set_display_size(display_size)

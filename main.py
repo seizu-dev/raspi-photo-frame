@@ -127,7 +127,8 @@ class App:
         if self._provider is not None:
             # provider は PhotoCache より先に生成するため、実際の表示解像度
             # （renderer.size）はこの時点で初めて分かる。thumbnailLink の要求寸法の
-            # 計算に使うため、対応する provider（Drive）にだけ渡す
+            # 計算（Drive）と、preview では足りないときの fullsize の取り直しの判定
+            # （Immich）に使うため、対応する provider にだけ渡す
             # （`set_display_size` を持たない provider は無視してよい任意メソッド）。
             set_display_size = getattr(self._provider, 'set_display_size', None)
             if callable(set_display_size):

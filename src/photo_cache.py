@@ -701,14 +701,32 @@ class PhotoCache:
                 # crop 後の中間画像がまだ大きいままメモリに乗り、
                 # ピークメモリが膨らむ（RAM 512MB が最大の制約のため
                 # ここは必ず1回の resize で済ませること）。
-                # thumbnail() と異なり、元が max_size より小さい場合は
-                # 拡大される（「隙間なく埋める」以上そうなる仕様どおりの
-                # 非対称。小さい写真では contain と解像感が変わる）。
+                # 元が max_size より小さい場合も拡大される（「隙間なく埋める」以上
+                # そうなる仕様どおりの挙動）。contain も小さい写真では同様に拡大する
+                # ようにしてあり（下の else 側）、両者は揃っている。
                 img = ImageOps.fit(img, max_size, method=Image.Resampling.LANCZOS,
                                    centering=(0.5, 0.5))
             else:
-                # thumbnail() はアスペクト比を保ち、元より大きくはしない
-                img.thumbnail(max_size, Image.Resampling.LANCZOS)
+                max_w, max_h = max_size
+                if img.width <= max_w and img.height <= max_h:
+                    # 元が表示寸法の縦横どちらにも収まる場合（thumbnail() が何もしない
+                    # ケース）だけ、比率を保って拡大する。画面が写真より大きい環境
+                    # （4K 等）で contain の写真が小さく表示されるのを避けるため。
+                    # 画面より大きい画像は従来どおり thumbnail() に任せるので、実機
+                    # 1024x600 の出力（既存キャッシュ）はバイト単位で変わらない。
+                    # ちょうど同寸のときは何もしない。片辺は丸めずに max_size へ
+                    # ぴったり合わせ、もう片辺は max_size を超えないよう丸める。
+                    if (img.width, img.height) != (max_w, max_h):
+                        if max_w * img.height <= max_h * img.width:
+                            new_h = max(1, round(img.height * max_w / img.width))
+                            new_size = (max_w, min(max_h, new_h))
+                        else:
+                            new_w = max(1, round(img.width * max_h / img.height))
+                            new_size = (min(max_w, new_w), max_h)
+                        img = img.resize(new_size, Image.Resampling.LANCZOS)
+                else:
+                    # thumbnail() はアスペクト比を保って縮小する
+                    img.thumbnail(max_size, Image.Resampling.LANCZOS)
         else:
             # サムネイル保存経路（store_thumbnail() 経由）。Immich のサムネイルは
             # 既に短辺 250px 程度（333x250 / 444x250）のためここでは縮小されない
