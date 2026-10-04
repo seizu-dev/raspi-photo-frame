@@ -1,10 +1,19 @@
 import logging
 import os
+from io import BytesIO
 from typing import TYPE_CHECKING, Any, Callable
 
 import requests
+from PIL import Image
 
 from src.daily_pickup_manager import DailyPickupManager
+from src.photo_cache import (
+    FIT_CONTAIN,
+    FIT_COVER,
+    normalize_fit,
+    original_pixel_limit,
+    resolve_fit,
+)
 from src.photo_provider import ProviderError
 
 if TYPE_CHECKING:
@@ -16,6 +25,11 @@ DEFAULT_TIMEOUT = 30
 # ページ送りが終わらない場合の安全弁。Immich の検索 API は nextPage を返すが、
 # 実レスポンスは未確認のため上限を設けて無限ループを防ぐ。
 MAX_SEARCH_PAGES = 100
+
+
+def _aspect_kind(size: tuple[int, int]) -> int:
+    """ 横長 1 / 縦長 -1 / 正方形 0 """
+    return (size[0] > size[1]) - (size[0] < size[1])
 
 
 class ImmichAPI:
@@ -51,6 +65,17 @@ class ImmichAPI:
         self.album_thumbnail_expires = False
         # 通信が高価なので、写真リストのキャッシュが生きていれば取り直さない
         self.rescan_on_load = False
+        # 表示解像度。未設定（None）なら従来どおり preview のみを取得する
+        # （set_display_size() の docstring 参照）。
+        self._display_size: tuple[int, int] | None = None
+
+    def set_display_size(self, size: tuple[int, int]) -> None:
+        """
+        表示解像度を伝える。gdrive_api.py の同名メソッドと同じ理由で、`PhotoCache` は
+        provider より後に生成されるため main.py / warm_cache.py がキャッシュ生成後に呼ぶ。
+        未呼び出しなら preview のみを取得する（従来と同じ挙動）。
+        """
+        self._display_size = size
 
     def update_status(self, message: str) -> None:
         """ 進捗を通知する。コールバック未指定でも実機の調査手段としてログには必ず残す """
@@ -226,8 +251,93 @@ class ImmichAPI:
             raise ProviderError(str(e)) from e
 
     def fetch_photo(self, asset_id: str) -> bytes | None:
-        """ PhotoProvider Protocol 用の窓口。表示用の preview サイズをそのまま返す """
-        return self.download_asset(asset_id, size='preview')
+        """
+        PhotoProvider Protocol 用の窓口。表示用の写真を返す。
+
+        基本は preview。preview（1920x1440〜3835x2160 程度。写真ごとに異なる）から
+        表示寸法を作るのに拡大が必要なときだけ fullsize を取り直す（画面が大きい環境、
+        または原本が表示寸法より小さい場合）。表示寸法より大きい preview なら
+        fullsize へは一切アクセスしない。
+        """
+        preview = self.download_asset(asset_id, size='preview')
+        if preview is None or self._display_size is None:
+            return preview
+        try:
+            with Image.open(BytesIO(preview)) as img:
+                # ヘッダだけ読む（load しない）。寸法が取れなければ preview のまま返す
+                preview_size = img.size
+        except Exception as e:
+            logger.debug('preview の寸法を読めませんでした (ID: ...%s): %s', asset_id[-6:], e)
+            return preview
+        if not self._needs_larger_source(preview_size):
+            return preview
+
+        full = self.download_asset(asset_id, size='fullsize', quiet=True)
+        if not full:
+            return preview
+        try:
+            with Image.open(BytesIO(full)) as img:
+                full_size = img.size
+                full_format = img.format
+                full_orientation = self._read_orientation(img)
+        except Exception as e:
+            logger.debug('fullsize の寸法を読めませんでした (ID: ...%s): %s', asset_id[-6:], e)
+            return preview
+        tag = asset_id[-6:]
+        if full_size[0] * full_size[1] <= preview_size[0] * preview_size[1]:
+            # JXL 原本などは fullsize が preview と同一になる。取り直した意味が無い
+            logger.debug('fullsize を採用しません (ID: ...%s): preview と同寸以下', tag)
+            return preview
+        if full_orientation not in (None, 1):
+            # fullsize は原本そのもので EXIF Orientation が未適用。Immich 経路には
+            # exif_transpose を掛けない契約（preview は既に正しい向き）なので、
+            # 回転付きの原本を採ると横倒しで焼かれてしまう
+            logger.debug('fullsize を採用しません (ID: ...%s): Orientation=%s', tag, full_orientation)
+            return preview
+        if _aspect_kind(full_size) != _aspect_kind(preview_size):
+            # 回転の取りこぼし等で向き（横/縦/正方形）が食い違うものも採らない
+            logger.debug('fullsize を採用しません (ID: ...%s): 向き不一致 preview=%s full=%s',
+                         tag, preview_size, full_size)
+            return preview
+        if full_size[0] * full_size[1] > original_pixel_limit(full_format):
+            logger.debug('fullsize を採用しません (ID: ...%s): 画素上限超過 %s %dx%d',
+                         tag, full_format, *full_size)
+            return preview
+        # 縮小デコード（draft）は JPEG に常に掛かるが、縮小倍率が 2 未満のとき
+        # （表示寸法が原本の半分より大きい。4K では多くがこれに当たる）は効かず全画素デコードに
+        # なる（24MP で数十〜百MB 級）。大きな画面向け（デスクトップ）での利用を想定し、
+        # 今回は許容している。
+        logger.info('fullsize を採用しました (ID: ...%s, preview=%dx%d -> fullsize=%dx%d)',
+                    tag, *preview_size, *full_size)
+        return full
+
+    @staticmethod
+    def _read_orientation(img: Image.Image) -> int | None:
+        """
+        EXIF Orientation をデコードを誘発せずに読む。PNG の `getexif()` は EXIF が
+        無いと全画素をデコードする（known-issues）ため、JPEG 以外は `info['exif']` の
+        有無で判断し、無ければ回転なしとみなす。
+        """
+        if img.format != 'JPEG' and 'exif' not in img.info:
+            return None
+        return img.getexif().get(0x0112)
+
+    def _needs_larger_source(self, preview_size: tuple[int, int]) -> bool:
+        """
+        preview から表示寸法を作るのに拡大が必要か。fit の解決は
+        `photo_cache.resolve_fit()` を再利用し、判定式は複製しない。
+        contain は倍率 min(W/w, H/h) > 1、cover は max(W/w, H/h) > 1 のとき拡大になる。
+        """
+        assert self._display_size is not None
+        disp_w, disp_h = self._display_size
+        width, height = preview_size
+        if width <= 0 or height <= 0 or disp_w <= 0 or disp_h <= 0:
+            return False
+        fit = resolve_fit(normalize_fit(self.settings.get('photo_fit', FIT_CONTAIN)),
+                          (width, height), (disp_w, disp_h))
+        if fit == FIT_COVER:
+            return max(disp_w / width, disp_h / height) > 1
+        return min(disp_w / width, disp_h / height) > 1
 
     def fetch_album_thumbnail(self, album: dict[str, Any]) -> bytes | None:
         """ PhotoProvider Protocol 用の窓口。アルバムのサムネイル用アセットを取得する """
@@ -237,7 +347,7 @@ class ImmichAPI:
         return self.download_asset(thumb_id, size='thumbnail')
 
     def download_asset(self, asset_id: str, size: str = 'preview',
-                       timeout: int = DEFAULT_TIMEOUT) -> bytes | None:
+                       timeout: int = DEFAULT_TIMEOUT, quiet: bool = False) -> bytes | None:
         """
         アセットの画像データをそのままバイト列で返す。
 
@@ -250,7 +360,11 @@ class ImmichAPI:
             response.raise_for_status()
             return response.content
         except requests.exceptions.RequestException as e:
-            self.update_status(f'画像取得エラー (ID: {asset_id}, size: {size}): {e}')
+            if quiet:
+                # 任意の取り直し（fullsize）の失敗は正常系。preview へフォールバックする
+                logger.info('画像取得に失敗しました (ID: %s, size: %s): %s', asset_id, size, e)
+            else:
+                self.update_status(f'画像取得エラー (ID: {asset_id}, size: {size}): {e}')
         return None
 
     def get_thumbnail_url(self, asset_id: str, size: str = 'preview') -> str:

@@ -103,6 +103,8 @@ Docker 基盤 約75MB と他コンテナを引いた残りがアプリの取り�
     RGBA+回転 +90MB、lossless +102MB（旧経路は 8MP で +125MB）。
 -   **EXIF 補正（`exif_transpose`）を Immich 経路に掛けない。** `delivers_originals`
     が True の取得元（Drive）だけに適用する。
+    そのため `immich_api.py` の `fetch_photo()` は、Orientation 付き・向き不一致の
+    fullsize を採用せず preview を使う（fullsize は原本で向きが未補正のため）。
 -   **署名付き URL（Drive の `thumbnailLink` 等）とアクセストークンをログに出さない。**
 
 ## ディレクトリ構成
@@ -302,6 +304,11 @@ src/
     `slideshow.py` から受け取って使う契約**で、`slide` / `wipe` のオフセットや
     切り出し矩形もこの1か所の等倍配置を起点に計算する。式を複製すると
     遷移の種類ごとに配置がずれる
+    **contain は元が表示寸法に収まる小さい写真を拡大する**（`_shrink()`。画面が写真より
+    大きい環境で小さく出ないため。画面より大きい写真は従来どおり `thumbnail()` で
+    出力不変）。拡大後も片辺は表示寸法ぴったりで、もう片辺は超えない。
+    **全取得元で、表示寸法より小さい原本は拡大される**（実機 1024x600 でも小さい原本の
+    新規キャッシュは出力が変わる。画面より大きい写真の既存キャッシュは無効にならない）。
 -   `gui/transitions.py` の遷移名一覧（`crossfade` / `fade_black` / `slide` / `wipe`。
     `random` はこの4種から抽選する側で新しい遷移名そのものではない）↔
     `gui/screens/settings.py` の `_ROWS` にある Spinner の options ↔
@@ -555,6 +562,17 @@ src/
         （`_looks_large_enough()`）は、この2倍した要求寸法ではなく target（2倍
         する前）を基準にする**（Drive は元画像より大きくは拡大しないため、
         要求寸法を基準にすると通常の写真で常に小さすぎる判定になってしまう）
+    -   Immich の `set_display_size()`（`immich_api.py`）↔ `main.py` /
+        `warm_cache.py` の `getattr(provider, 'set_display_size')` の配線（Drive と共用。
+        `PhotoProvider` Protocol には足さない任意メソッド）↔ `resolve_fit()` の再利用。
+        `fetch_photo()` は preview の寸法（ヘッダのみ）から拡大が必要なときだけ
+        `size=fullsize` を取り直す（contain: `min(W/w,H/h) > 1`、cover: `max(...) > 1`）。
+        **原本が表示寸法より小さい場合を除き、preview の方が大きい実機 1024x600 では
+        fullsize へアクセスしない**（小さい原本は実機でも fullsize を1回取りに行く）。
+        未設定なら preview のみ（従来どおり）。**採用しない条件**: 画素数が preview 以下
+        （JXL 原本は同一）・取得失敗・EXIF Orientation が 1 と未設定以外（fullsize は原本で未補正）・
+        向き（横/縦/正方形）が preview と不一致・`original_pixel_limit()` 超過
+        （式は再利用し複製しない）
     -   **HEIC/HEIF の原本はデコードしない。** `gdrive_api.py` の
         `ORIGINAL_MIME_ALLOWED`（JPEG/PNG/WebP のみ）↔ `_skipped_originals`
         （一度スキップしたら `files.get` すら呼ばず即座に諦める）。
