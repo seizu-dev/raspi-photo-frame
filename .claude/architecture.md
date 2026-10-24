@@ -598,6 +598,20 @@ src/
         変わったときだけ `album_id` 等を初期化する）。**`""` → `'immich'` の遷移では
         何も初期化しない**（既存の実機の `settings.json` がアップデートのたびに
         消えるのを防ぐため）
+    -   `immich_api.py` の `FILTER_SEARCH_MIN_VERSION`（3.2）/ `_use_filter_search()` ↔
+        新方式（`_search_album_assets()` / `_search_cursor()`）と旧方式（`_legacy_album_assets()` /
+        `_legacy_favorite_assets()`）の2経路 ↔ `tools/verification/album_grid_bench.py` の
+        `SyntheticAlbumAPI`。**Immich 3.x は `GET /api/albums/{id}` が `assets` を返さない**ため、
+        3.2 以上は検索 API の filter / cursor 方式、未満は従来方式に分岐する（版は
+        `GET /api/server/version` を1回だけ問い合わせて記憶。取得の入口は
+        `_fetch_album_assets_raw()` / `_fetch_favorite_assets_info()` で、分岐はこの関数だけが
+        判断する）。**旧方式の出力（並び・`album_name`・撮影日）は変えない契約**で、新方式は
+        それと同じ形の asset info を返す。旧方式を消すときは `_use_filter_search()` と
+        `_legacy_*` を消して入口を新方式に固定するだけでよい（呼び出し側は変わらない）。
+        `SyntheticAlbumAPI` を変えるときは両経路で動くか確認する。
+        **`_legacy_album_assets()` が応答に `assets` キーが無いのを見たら `_filter_search` を
+        `None` へ戻す**（稼働中に Immich が 2.x → 3.x へ上がっても再起動なしで新方式へ移るため）。
+        この戻しを消すと、記憶した旧方式の判定が残って再起動まで0件が続く
     -   `src/immich_api.py` の `fetch_assets_info()` / `_fetch_daily_pickup_assets_info()`
         等の**旧経路は後方互換のためそのまま残してあり、`PhotoSource` はもう
         呼ばない**（`tools/verification/album_grid_bench.py` の

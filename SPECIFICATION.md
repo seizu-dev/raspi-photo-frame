@@ -453,6 +453,22 @@ photo-frame の機能仕様を踏襲する。
 *   **認証**: 事前に生成した API キーを設定ファイルまたは環境変数で与える。
 *   **写真ソース**: お気に入り / 指定アルバム / デイリーピックアップ から選択。
 *   **表示**: 写真に説明文がある場合、画面下部にテキスト表示する。日本語フォントの同梱が必要。
+*   **対応バージョン（2.x / 3.x）**: アルバム・お気に入りの写真一覧の取得方式をサーバーの版で
+    切り替える。`GET /api/server/version` を最初に必要になったときに1回だけ問い合わせ、
+    **3.2.0 以上は新方式、未満は旧方式**を使う（通信失敗は覚えず次回問い合わせ直す。
+    応答の形が異常なら旧方式扱いで記憶する）。旧方式で `GET /api/albums/{id}` の応答に
+    `assets` が無かったときは判定を捨てて次回問い合わせ直す（稼働中に 2.x から 3.x へ
+    上がった場合に、1回空振りしたあと新方式へ移るため）。
+    *   **新方式**: `POST /api/search/metadata` に `filter.albumIds.any`（お気に入りは
+        `filter.isFavorite.eq`）・`withExif`・`orderBy`（`fileCreatedAt` 降順）・`size=1000` を渡し、
+        `nextCursor` を `cursor` に渡してページ送りする。アルバムの `order` は
+        `GET /api/albums/{id}` から読み、`asc` のとき反転する（デイリーピックアップは反転しない）。
+        **Immich 3.x では `GET /api/albums/{id}` のレスポンスに `assets` 配列が無い**
+        （`assetCount` のみ）ため、この方式でないとアルバムが0件になる。
+    *   **旧方式（廃止予定）**: `GET /api/albums/{id}` の `assets` 配列と、トップレベルの
+        `isFavorite` + `nextPage` による検索。3.2.0 で旧形式（トップレベルの `albumIds` /
+        `isFavorite` / `order`、レスポンスの `nextPage` / `total`）は deprecated。
+    *   必要な API キー権限は変わらない（新方式の検索は `asset.read`）。
 
 **Google Drive 連携**
 

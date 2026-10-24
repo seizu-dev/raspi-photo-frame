@@ -22,9 +22,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30
-# ページ送りが終わらない場合の安全弁。Immich の検索 API は nextPage を返すが、
-# 実レスポンスは未確認のため上限を設けて無限ループを防ぐ。
+# ページ送りが終わらない場合の安全弁。旧方式は nextPage、新方式は nextCursor を返す
+# （どちらも実サーバーで正しく終端することは確認済み）が、想定外の応答に備えて
+# 上限を設けて無限ループを防ぐ。
 MAX_SEARCH_PAGES = 100
+# 検索 API の filter / cursor 形式（POST /api/search/metadata）が入った Immich の版。
+# v3.2.0 で旧形式（トップレベルの albumIds / isFavorite、nextPage）が deprecated になり、
+# v3 では GET /api/albums/{id} のレスポンスから assets 配列も無くなった。
+FILTER_SEARCH_MIN_VERSION = (3, 2)
+# 新方式で 1 リクエストに求める件数（API の上限。ページ数を減らして通信を抑える）
+SEARCH_PAGE_SIZE = 1000
 
 
 def _aspect_kind(size: tuple[int, int]) -> int:
@@ -68,6 +75,43 @@ class ImmichAPI:
         # 表示解像度。未設定（None）なら従来どおり preview のみを取得する
         # （set_display_size() の docstring 参照）。
         self._display_size: tuple[int, int] | None = None
+        # サーバーが検索 API の filter 方式に対応しているか。None は未問い合わせ
+        # （_use_filter_search() の docstring 参照）。
+        self._filter_search: bool | None = None
+
+    def _use_filter_search(self) -> bool:
+        """
+        新方式（検索 API の filter / cursor）を使うかを返す。新旧の分岐はここだけで判断する
+        （各取得の入口がこれを見る）。将来 v3.2 未満を切り捨てるときは、この関数と
+        `_legacy_*` のメソッドを消し、入口を新方式に固定すればよい。
+
+        GET /api/server/version を最初に必要になったときに 1 回だけ問い合わせて覚える。
+        通信に失敗したときは覚えずに例外を上げる（呼び出し側が ProviderError に変換して
+        失効キャッシュへフォールバックし、次回の取得で問い合わせ直す）。
+        応答の形がおかしいときは旧方式として扱い、その結果を覚える。形の異常は
+        問い合わせ直しても直らない（プロキシ等が別物を返している）ため、毎回例外にして
+        写真リストが永久に取れなくなるより、従来の挙動へ倒す方が安全と判断した。
+        """
+        if self._filter_search is not None:
+            return self._filter_search
+
+        version = self._get('/api/server/version')
+        major = version.get('major') if isinstance(version, dict) else None
+        minor = version.get('minor') if isinstance(version, dict) else None
+        if (not isinstance(major, int) or isinstance(major, bool)
+                or not isinstance(minor, int) or isinstance(minor, bool)):
+            logger.warning('Immich のバージョン応答を解釈できないため旧方式で取得します')
+            self._filter_search = False
+            return False
+
+        patch = version.get('patch')
+        label = f'{major}.{minor}.{patch if isinstance(patch, int) else "?"}'
+        self._filter_search = (major, minor) >= FILTER_SEARCH_MIN_VERSION
+        if self._filter_search:
+            logger.info('Immich %s: 検索 API の filter 方式でアルバムを取得します', label)
+        else:
+            logger.info('Immich %s: 旧方式（アルバム API の assets）でアルバムを取得します', label)
+        return self._filter_search
 
     def set_display_size(self, size: tuple[int, int]) -> None:
         """
@@ -139,7 +183,62 @@ class ImmichAPI:
         if not album_id:
             return []
 
+        if self._use_filter_search():
+            return self._search_album_assets(album_id, apply_album_order)
+        return self._legacy_album_assets(album_id, apply_album_order)
+
+    def _search_album_assets(self, album_id: str,
+                            apply_album_order: bool) -> list[dict[str, Any]]:
+        """
+        検索 API の filter / cursor 方式でアルバムのアセットを取得する（v3.2 以降）。
+
+        v3 では GET /api/albums/{id} が assets を返さないため検索 API を使う。
+        アルバムの `order` だけはそちらのメタデータから読む。降順で取ってから 'asc' のとき
+        反転する形は旧方式と同じ（取得順を 1 つに固定して表示順の差を作らないため）。
+        """
+        # order を読むためだけの取得なので、順序を使わない呼び出し（デイリーピックアップ）では省く
+        album_response = self._get(f'/api/albums/{album_id}') if apply_album_order else {}
+        body = {
+            'filter': {'albumIds': {'any': [album_id]}},
+            'size': SEARCH_PAGE_SIZE,
+            'withExif': True,
+            'orderBy': {'field': 'fileCreatedAt', 'direction': 'desc'},
+        }
+        items = self._search_cursor(body)
+        assets_info = [self._to_asset_info(item) for item in items]
+        if apply_album_order and album_response.get('order', 'desc') == 'asc':
+            assets_info.reverse()
+        return assets_info
+
+    def _search_cursor(self, body: dict[str, Any]) -> list[dict[str, Any]]:
+        """ 検索 API を nextCursor で辿って全件を集める（上限は MAX_SEARCH_PAGES） """
+        items: list[dict[str, Any]] = []
+        request = dict(body)
+        for _ in range(MAX_SEARCH_PAGES):
+            response = self._post('/api/search/metadata', request)
+            assets = response.get('assets') or {}
+            items.extend(assets.get('items') or [])
+            cursor = assets.get('nextCursor')
+            if not cursor:
+                break
+            request['cursor'] = cursor
+        else:
+            logger.warning('検索のページ送りが上限 %d に達しました。取得漏れの可能性があります。',
+                           MAX_SEARCH_PAGES)
+        return items
+
+    def _legacy_album_assets(self, album_id: str,
+                             apply_album_order: bool) -> list[dict[str, Any]]:
+        """ v3.2 未満向け（廃止予定）。GET /api/albums/{id} の assets 配列から読む """
         album_response = self._get(f'/api/albums/{album_id}')
+        if 'assets' not in album_response:
+            # v3 では assets が無い。restart: unless-stopped で長期稼働するため、稼働中に
+            # Immich が 2.x から 3.x へ上がると旧方式の判定が残り、永久に 0 件になる。
+            # 判定を捨てて次回の取得で version を問い合わせ直す（この回は空振りする）。
+            logger.warning('アルバム API の応答に assets が無いため、'
+                           '次回 Immich のバージョンを確認し直します')
+            self._filter_search = None
+            return []
         items = album_response.get('assets', [])
         if not isinstance(items, list):
             return []
@@ -152,6 +251,15 @@ class ImmichAPI:
 
     def _fetch_favorite_assets_info(self) -> list[dict[str, Any]]:
         """ お気に入りのアセット情報を取得する。検索 API はページ分割されるため follow する """
+        if self._use_filter_search():
+            # withExif はアルバムと揃える（無いと撮影日が fileCreatedAt になる）
+            items = self._search_cursor({'filter': {'isFavorite': {'eq': True}},
+                                         'size': SEARCH_PAGE_SIZE, 'withExif': True})
+            return [self._to_asset_info(item) for item in items]
+        return self._legacy_favorite_assets()
+
+    def _legacy_favorite_assets(self) -> list[dict[str, Any]]:
+        """ v3.2 未満向け（廃止予定）。トップレベルの isFavorite と nextPage で辿る """
         items: list[dict[str, Any]] = []
         page = 1
         while page <= MAX_SEARCH_PAGES:
@@ -191,15 +299,18 @@ class ImmichAPI:
         assets_info: list[dict[str, Any]] = []
         for album_id in selected_album_ids:
             try:
-                album_response = self._get(f'/api/albums/{album_id}')
+                # デイリーピックアップはアルバムの order を見ない（旧実装と同じ）
+                items = self._fetch_album_assets_raw(album_id, apply_album_order=False)
             except requests.exceptions.RequestException as e:
                 # 1つのアルバムが取れなくても残りは表示したいので、ここだけは継続する
                 self.update_status(f'アルバム取得エラー (ID: {album_id}): {e}')
                 continue
 
             album_name = album_name_map.get(album_id, '')
-            for item in album_response.get('assets', []):
-                assets_info.append(self._to_asset_info(item, album_name))
+            for info in items:
+                if album_name:
+                    info['album_name'] = album_name
+                assets_info.append(info)
 
         return assets_info
 

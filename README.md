@@ -104,6 +104,7 @@ cp .env.sample .env                              # put your Immich URL and API k
 cp config/settings.sample.json config/settings.json
 ```
 
+Works with Immich 2.x and 3.x.
 Your Immich API key only needs three permissions (confirmed against Immich 2.7.5's OpenAPI spec):
 
 | Permission | API it backs | Used for |

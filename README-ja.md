@@ -98,6 +98,7 @@ cp .env.sample .env                              # Immich の URL と API キー
 cp config/settings.sample.json config/settings.json
 ```
 
+Immich 2.x と 3.x の両方で動作します。
 Immich の API キーには次の3つの権限があれば足ります（Immich 2.7.5 の OpenAPI スペックで確認）。
 
 | 権限 | 使う API | 用途 |
