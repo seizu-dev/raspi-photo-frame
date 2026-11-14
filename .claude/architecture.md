@@ -47,7 +47,8 @@ Docker 基盤 約75MB と他コンテナを引いた残りがアプリの取り�
     実行時リサイズを行わない。
 5.  **ロジック層は photo-frame から移植し、GUI 層のみ新規実装する。**
 7.  **ディスプレイ消灯は ctypes 経由の DRM DPMS で行う。**
-    -   `vcgencmd display_power` は Full KMS では無効（photo-frame の方式は使えない）
+    -   `vcgencmd display_power` は Full KMS では無効（photo-frame は DSI パネルの
+        バックライトを GPIO 26 で切っていたが、HDMI では使えない）
     -   `/sys/class/graphics/fb0/blank` は SDL が DRM master を握ると無効になる
     -   CEC はパネルが非対応
     -   **DRM master は1プロセスのみ。** 消灯時は SDL を破棄して master を解放し、

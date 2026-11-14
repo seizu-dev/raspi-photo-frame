@@ -63,6 +63,7 @@ video=HDMI-A-1:1024x600MR@50e
 ### 2.3. 配線・接続 (GPIO)
 
 GPIO ピン配置は Pi 3 Model B と同一の 40pin であり、photo-frame の配線をそのまま流用できる。
+ただし AM312 の OUT は photo-frame のコードでは GPIO 17 だったが、本プロジェクトは GPIO 18 を使う。
 
 *   **AM312 接続**（2026-09-03、実機に実配線して確認済み）:
     *   VCC -> 物理17番ピン (3V3)
@@ -652,7 +653,8 @@ photo-frame では `transition` と `max_slides_in_memory` がどこからも参
     2026-09-03 の実機検証では検知範囲が想定より広く、`power_saving_timeout` を
     短くしても人がいる限り消灯しないことを確認した（仕様どおりの動作）。
 *   **消灯方式**: **ctypes 経由の DRM DPMS で確定**（第9章 9-1）。`display_manager.py` が実装する。
-    photo-frame が使用していた `vcgencmd display_power` は DSI 前提であり、
+    photo-frame は DSI パネルのバックライトを GPIO 26 で切っていた（HDMI では使えない）。
+    `vcgencmd display_power` は photo-frame の仕様書に案として挙がっていただけで実装されておらず、
     HDMI + Full KMS では終了コード 0 を返すだけで何も起きない。
     `fb0/blank` は SDL が DRM master を取ると無効になり、CEC はパネルが応答しない。
 
@@ -763,7 +765,7 @@ SDL が master を握っている間、別 fd からの `drmSetMaster()` は
 
 | 方式 | アプリ非稼働時 | アプリ稼働中 | 備考 |
 |---|---|---|---|
-| `vcgencmd display_power 0` | ❌ 無効 | ❌ 無効 | **photo-frame が採用していた方式。Full KMS では機能しない。**<br>終了コードは 0 を返すが値が変化せず、`dpms` も `pixel` も変わらない |
+| `vcgencmd display_power 0` | ❌ 無効 | ❌ 無効 | **photo-frame の仕様書に案として挙がっていた方式（実装は GPIO 26 のバックライト制御）。Full KMS では機能しない。**<br>終了コードは 0 を返すが値が変化せず、`dpms` も `pixel` も変わらない |
 | `/sys/class/graphics/fb0/blank` | ✅ 消灯する | ❌ 無効 | fbcon 経由の制御であり、SDL が DRM master を取ると<br>fbcon が非アクティブになるため切り離される。root 権限も必要 |
 | `cec-ctl --standby` | ❌ | ❌ | パネルが CEC に応答しない（`Tx, Not Acknowledged, Max Retries`）。<br>`/dev/cec0` は存在するがパネル側が非対応 |
 
