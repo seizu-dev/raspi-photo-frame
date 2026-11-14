@@ -47,8 +47,13 @@ Docker 基盤 約75MB と他コンテナを引いた残りがアプリの取り�
     実行時リサイズを行わない。
 5.  **ロジック層は photo-frame から移植し、GUI 層のみ新規実装する。**
 7.  **ディスプレイ消灯は ctypes 経由の DRM DPMS で行う。**
-    -   `vcgencmd display_power` は Full KMS では無効（photo-frame は DSI パネルの
-        バックライトを GPIO 26 で切っていたが、HDMI では使えない）
+    既定は DRM DPMS。1号機（Pi 3B + HDMI パネル）向けに `PF_DISPLAY_POWER=gpio_backlight` を
+    選べる（1号機のホストで GPIO 26 だけでバックライトを点け消しできることは確認済み
+    〈2026-11-14、階層2相当の直接操作〉。**アプリ（コンテナ）経由の動作も確認済み**
+    〈2026-11-14、1号機の実機コンテナ＝階層3。ただし GHCR の latest に未コミットの
+    `main.py` / `src/` を bind mount で重ねた構成で、タグ付きリリースのイメージでは未確認〉）。
+    -   `vcgencmd display_power` は Full KMS では無効（photo-frame は HDMI パネルの
+        バックライトを GPIO 26 で切っていた。2号機のパネルにはその配線が無い）
     -   `/sys/class/graphics/fb0/blank` は SDL が DRM master を握ると無効になる
     -   CEC はパネルが非対応
     -   **DRM master は1プロセスのみ。** 消灯時は SDL を破棄して master を解放し、
@@ -82,8 +87,8 @@ Docker 基盤 約75MB と他コンテナを引いた残りがアプリの取り�
     内容が変化したときのみ Surface に描いて Texture を再生成し、以降は使い回す。
 -   **先読みを次の1枚より増やさない。** メモリ上限を保つため。
 -   **写真リスト全体を展開してメモリに持たない。**
--   **photo-frame のコードを無検証でコピーしない。** Pi 3 Model B + DSI + Kivy 前提の
-    記述が含まれる。`vcgencmd display_power` のような DSI/レガシー前提の手法は
+-   **photo-frame のコードを無検証でコピーしない。** Pi 3 Model B + GPIO バックライト + Kivy 前提の
+    記述が含まれる。`vcgencmd display_power` のようなレガシー前提の手法は
     Zero 2 W + Full KMS でそのまま通用するとは限らない。
 -   **`--privileged` に安易に倒さない。** 必要最小限のデバイスと capability で成立させる。
     どうしても不可能な場合のみ、理由を記録した上で緩和する。
@@ -139,7 +144,7 @@ src/
   config_manager.py         設定の読み書き（移植）
   motion_sensor.py          AM312 人感センサー（gpiod で再実装）
   touch_watcher.py          /dev/input の直読み（新規。消灯中の復帰に必須）
-  display_manager.py        ディスプレイ電源制御（再実装）
+  display_manager.py        ディスプレイ電源制御（再実装。DRM DPMS / GPIO バックライトの切り替え）
   power_schedule.py         時間帯による省電力モードの判定（新規）
   gui/
     renderer.py             SDL のライフサイクル / テクスチャ / フォント / 入力正規化
@@ -232,6 +237,19 @@ src/
     中央からずれる
 -   `SPECIFICATION.md` の決定事項 ↔ `.claude/architecture.md` の確定事項
 -   要検証事項を潰したとき: `SPECIFICATION.md` 第9章 ↔ `.claude/context/known-issues.md`
+-   `PF_DISPLAY_POWER` / `PF_BACKLIGHT_GPIO` / `PF_MOTION_SENSOR_GPIO` ↔ `main.py` の
+    環境変数の解析 ↔ `display_manager.py` のバックエンド分岐 ↔ `.env.sample` ↔
+    README 2本。**既定値は `drm_dpms` / 26 / 18。未設定時は2号機の現行動作と同じになる契約**
+    （未設定の既存環境の挙動を変えない）。`gpio_backlight` でも SDL 破棄→再生成の
+    流れを DPMS と共通にしているため、**`main.py` の消灯まわりと `generation` 追従を
+    方式ごとに分岐させない**。復帰の順序は「SDL 再生成 → バックライト High」
+    （先に点けるとコンソールが一瞬見える）。DRM master は触らず、GPIO は起動時に確保して
+    消灯中も保持し、終了時は High にしてから解放する（解放後も出力値が保たれることは
+    1号機のホストで確認済み。2026-11-14、`gpioset` で release 後に `pinctrl get 26` が
+    `op lo` / `op hi` のままであることを Low・High 双方で確認。階層2相当でアプリ未使用）。
+    **`docker-compose.yml` の `devices`（`/dev/gpiochip0`）と `group_add`（`GID_GPIO`）も対**。
+    外すと gpio_backlight の確保が失敗し、警告1行で消灯が黙って無効になる。コンテナ経由の動作は
+    1号機で確認済み（2026-11-14、階層3。GID は2号機と同じで変更不要。bind mount 構成）
 -   `display_manager.py` の消灯方式 ↔ SPECIFICATION.md 9-1 の検証結果
     ↔ `docker-compose.yml` のデバイスパススルー（消灯にデバイスが要る方式を選んだ場合）
 -   `requirements.txt` ↔ `Dockerfile` の apt 依存（pygame-ce は SDL2 のランタイムを必要とする）

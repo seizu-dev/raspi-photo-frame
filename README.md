@@ -278,6 +278,22 @@ the app is unaffected either way** — `.claude/context/` is not required for ei
   nothing under Full KMS, and `/sys/class/graphics/fb0/blank` stops working once SDL
   holds DRM master. Only one process can hold DRM master, so the app tears down SDL
   to release it before sleeping
+- **Other displays (first unit: Pi 3 Model B + HDMI panel with a GPIO-controlled
+  backlight) are selectable by environment variables in `.env`. Direct GPIO control on the
+  host and the app in the container have both been verified on that hardware.**
+  `PF_DISPLAY_POWER=gpio_backlight` switches sleep from DRM DPMS to a GPIO backlight
+  (High = on, Low = off; default pin 26 via `PF_BACKLIGHT_GPIO`, which needs
+  `gpio=26=op,dh` in `config.txt`). `PF_MOTION_SENSOR_GPIO` changes the sensor pin
+  (default 18; the first unit's old code used 17). Invalid values log a warning and
+  fall back to the defaults. SDL is still torn down and recreated around sleep; on
+  wake the backlight goes High after SDL is recreated. On the first unit's host (2026-11-14, without running the app), Full KMS
+  was confirmed, toggling GPIO 26 alone turned the backlight off and on, and the pin
+  kept its output value after release. The container was also verified there (2026-11-14, GHCR `latest`
+  with the uncommitted sources bind-mounted): 1920x1200 at 55-60 fps, steady VmRSS about
+  146 MB, idle sleep / touch wake / motion-sensor wake all work, SDL recreation takes
+  0.34-0.40 s, and the backlight is left on at exit. Not yet checked: a tagged release
+  image. The 3.0 s `display_wakeup_delay` default is unchanged; lower it from the settings
+  screen on that unit
 - **While the display is off there is no SDL, so pygame events are unavailable.**
   Waking on touch is done by reading `/dev/input` directly
 

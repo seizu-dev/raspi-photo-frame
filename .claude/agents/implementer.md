@@ -29,7 +29,7 @@ effort: medium
     DSI 前提の設定や `vcgencmd display_power` を無検証で持ち込まない
   - 画像は表示解像度で確定済みの状態でキャッシュし、実行時リサイズを行わない
 - **先行プロジェクト photo-frame（非公開）からコードを移植する際は、そのままコピーしない。**
-  Pi 3 Model B + DSI + Kivy を前提とした記述が含まれている。移植前に前提の差分を確認し、
+  Pi 3 Model B + HDMI パネル（GPIO 26 バックライト）+ Kivy を前提とした記述が含まれている。移植前に前提の差分を確認し、
   Zero 2 W 向けに読み替えた上で持ち込むこと。判断がつかなければ advisor に相談する。
 - 対で更新が必要な箇所を取りこぼさないこと:
   - `settings.json` / `settings.sample.json` のキー ↔ `config_manager.py` のデフォルト値
