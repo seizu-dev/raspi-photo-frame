@@ -48,4 +48,4 @@ clone していない環境にはそのファイルは存在しない。
 - **禁止パターンは `.claude/architecture.md` を必ず確認すること。**
   特にフルスクリーンのアルファ合成を CPU 側（`Surface.blit`）で行ってはならない。
 - **参照元**: 機能仕様で迷ったら先行プロジェクト photo-frame の実装を参照する（非公開）。
-  ただし Pi 3 Model B + DSI + Kivy 前提なので、GUI 層の設計は流用しないこと。
+  ただし Pi 3 Model B + HDMI パネル（GPIO 26 バックライト）+ Kivy 前提なので、GUI 層の設計は流用しないこと。

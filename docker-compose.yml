@@ -16,13 +16,13 @@ services:
       - "${GID_VIDEO:-44}"   # video  -> /dev/dri/card0（描画）
       - "${GID_RENDER:-992}" # render -> /dev/dri/renderD128（描画）
       - "${GID_INPUT:-996}"  # input  -> /dev/input/*（タッチ）
-      - "${GID_GPIO:-986}"   # gpio   -> /dev/gpiochip0（人感センサー）
+      - "${GID_GPIO:-986}"   # gpio   -> /dev/gpiochip0（人感センサー / gpio_backlight のバックライト）
 
     # --privileged は使わず必要最小限のデバイスだけ渡す
     devices:
       - /dev/dri:/dev/dri         # KMSDRM 描画
       - /dev/input:/dev/input     # USB タッチ入力
-      - /dev/gpiochip0:/dev/gpiochip0  # 人感センサー。無ければこの行を外す
+      - /dev/gpiochip0:/dev/gpiochip0  # 人感センサー / gpio_backlight のバックライト。センサーだけなら無ければ外してよいが、gpio_backlight では外さない
 
     volumes:
       - /run/udev:/run/udev:ro         # 無いと SDL2 がタッチデバイスを列挙できない

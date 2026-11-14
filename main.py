@@ -28,7 +28,9 @@ os.environ.setdefault('SDL_VIDEODRIVER', 'kmsdrm')
 import pygame as pg  # noqa: E402  (環境変数設定後に import する必要がある)
 
 from src.config_manager import ConfigManager  # noqa: E402
-from src.display_manager import DisplayManager  # noqa: E402
+from src.display_manager import (  # noqa: E402
+    DEFAULT_BACKLIGHT_PIN, DISPLAY_POWER_METHODS, METHOD_DRM_DPMS, METHOD_GPIO_BACKLIGHT,
+    DisplayManager)
 from src.gui.overlay import Overlay, read_vmrss_kb  # noqa: E402
 from src.gui.renderer import TAP_DOWN, Renderer  # noqa: E402
 from src.gui.screens import (  # noqa: E402
@@ -45,7 +47,7 @@ from src.gui.screens.settings import SettingsScreen  # noqa: E402
 from src.gui.screens.slideshow import SlideshowScreen  # noqa: E402
 from src import i18n  # noqa: E402
 from src.i18n import t  # noqa: E402
-from src.motion_sensor import MotionSensor  # noqa: E402
+from src.motion_sensor import DEFAULT_SENSOR_PIN, MotionSensor  # noqa: E402
 from src.photo_cache import PhotoCache  # noqa: E402
 from src.photo_provider import PhotoProvider, create_provider, reconcile_settings  # noqa: E402
 from src.photo_source import PhotoSource  # noqa: E402
@@ -67,6 +69,33 @@ DATE_CHECK_INTERVAL_SEC = 60.0
 # その場合に KMSDRM で復帰待ちウィンドウを開くと DRM master を握ってしまい、
 # 実機の消灯そのものを壊す（「消灯できないだけ」と「勝手に master を奪う」は別問題）
 IS_DEV_ENVIRONMENT = os.environ.get('IS_DEV_ENVIRONMENT', 'false').lower() == 'true'
+
+
+def read_env_choice(name: str, choices: tuple[str, ...], default: str) -> str:
+    """ 環境変数を選択肢から読む。未設定は既定値、不正値は警告して既定値へ戻す """
+    raw = os.environ.get(name, '').strip()
+    if not raw:
+        return default
+    if raw not in choices:
+        logger.warning('%s=%r は不正です（%s のいずれか）。%s を使います',
+                       name, raw, ' / '.join(choices), default)
+        return default
+    return raw
+
+
+def read_env_pin(name: str, default: int) -> int:
+    """ GPIO 番号を環境変数から読む。未設定は既定値、不正値（整数でない・負数）は警告して既定値 """
+    raw = os.environ.get(name, '').strip()
+    if not raw:
+        return default
+    try:
+        pin = int(raw)
+    except ValueError:
+        pin = -1
+    if pin < 0:
+        logger.warning('%s=%r は不正です（0 以上の整数）。%d を使います', name, raw, default)
+        return default
+    return pin
 
 
 def check_writable(env_name: str, fallback: str) -> None:
@@ -156,14 +185,29 @@ class App:
                               if self._provider is not None else None)
         self._screens: list = [self._slideshow] if self._slideshow is not None else []
 
-        # 消灯時は SDL を破棄して DRM master を解放する。順序は DisplayManager が保証する
+        # 機種差（1号機: HDMI + GPIO バックライト / 2号機: HDMI + DRM DPMS）は環境変数で切り替える
+        display_power = read_env_choice('PF_DISPLAY_POWER', DISPLAY_POWER_METHODS, METHOD_DRM_DPMS)
+        backlight_pin = read_env_pin('PF_BACKLIGHT_GPIO', DEFAULT_BACKLIGHT_PIN)
+        sensor_pin = read_env_pin('PF_MOTION_SENSOR_GPIO', DEFAULT_SENSOR_PIN)
+        logger.info('消灯方式=%s バックライトGPIO=%s 人感センサーGPIO=%d', display_power,
+                    backlight_pin if display_power == METHOD_GPIO_BACKLIGHT else '-', sensor_pin)
+        if display_power == METHOD_GPIO_BACKLIGHT and backlight_pin == sensor_pin:
+            # 動作は変えない。先に確保する DisplayManager が勝ち、センサーは EBUSY で無効になる
+            logger.warning('PF_BACKLIGHT_GPIO と PF_MOTION_SENSOR_GPIO が同じ番号（%d）です。'
+                           'バックライトが先に確保するため、人感センサーは確保できず無効になります',
+                           sensor_pin)
+
+        # 消灯時は SDL を破棄する（DPMS 方式ではこれで DRM master を解放する）。
+        # 順序は DisplayManager が保証する
         self._display = DisplayManager(
             on_release_display=self._renderer.destroy,
             on_recreate_display=self._renderer.create,
             wakeup_delay=float(self._config.get('display_wakeup_delay', 3.0)),
+            method=display_power,
+            backlight_pin=backlight_pin,
         )
 
-        self._sensor = MotionSensor(on_motion=self._on_activity)
+        self._sensor = MotionSensor(sensor_pin=sensor_pin, on_motion=self._on_activity)
         # start/stop の呼び出しを直列化するロックと、「意図した状態」を保持するフラグ。
         # start() の戻り値（GPIO を実際に確保できたか）とは別物にする。開発環境では
         # 確保に必ず失敗し常に False が返るため、戻り値を採用すると設定が有効なままの

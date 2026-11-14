@@ -14,7 +14,7 @@ Raspberry Pi Zero 2 W とタッチディスプレイを使用し、セルフホ�
 |---|---|---|
 | ターゲット機 | Pi 3 Model B (1GB RAM) | **Pi Zero 2 W (512MB RAM)** |
 | GUI フレームワーク | Kivy 2.3.1 | **pygame-ce** |
-| ディスプレイ接続 | DSI 公式タッチディスプレイ | **mini HDMI + USB タッチ** |
+| ディスプレイ接続 | HDMI タッチパネル（バックライトは GPIO 26 で制御）+ USB タッチ | **mini HDMI + USB タッチ** |
 | 画像リサイズ | 実行時にリサイズ | **キャッシュ時に解像度確定、実行時リサイズ廃止** |
 | 実行形態 | systemd で直接起動 | **Docker コンテナ**（リモート管理 UI でリモート運用） |
 | OS のビット数 | — | **ARM64 (64bit) で確定** |
@@ -38,7 +38,9 @@ Raspberry Pi Zero 2 W とタッチディスプレイを使用し、セルフホ�
 
 **Raspberry Pi Zero 2 W には DSI コネクタが存在しない。**
 Zero 2 W のポート構成は mini HDMI / micro USB OTG / micro USB 電源 / CSI-2 カメラ / microSD / 40pin GPIO であり、
-photo-frame が使用していた Raspberry Pi 公式タッチディスプレイ（DSI 接続）はそのまま流用できない。
+DSI 接続のディスプレイ（Raspberry Pi 公式タッチディスプレイ等）は使えない。
+（なお photo-frame が使っていたのは DSI ではなく HDMI パネルで、バックライトを GPIO 26 で制御していた。
+2号機のパネルにはその配線が無い。）
 
 このため本プロジェクトでは **mini HDMI 映像出力 + USB 接続タッチパネル** を前提とする。
 タッチ入力は USB HID として認識されるため、`evdev` 経由で読み取り可能である。
@@ -63,6 +65,8 @@ video=HDMI-A-1:1024x600MR@50e
 ### 2.3. 配線・接続 (GPIO)
 
 GPIO ピン配置は Pi 3 Model B と同一の 40pin であり、photo-frame の配線をそのまま流用できる。
+ただし AM312 の OUT は photo-frame のコードでは GPIO 17 だったが、本プロジェクトは GPIO 18 を使う。
+環境変数 `PF_MOTION_SENSOR_GPIO`（既定 18）で変えられる（1号機は旧コードの 17 に合わせられる）。
 
 *   **AM312 接続**（2026-09-03、実機に実配線して確認済み）:
     *   VCC -> 物理17番ピン (3V3)
@@ -296,7 +300,7 @@ src/
 | `daily_pickup_manager.py` (67行) | ほぼそのまま | フレームワーク非依存 |
 | `config_manager.py` (61行) | ほぼそのまま | フレームワーク非依存 |
 | `motion_sensor.py` (98行) | そのまま | GPIO 配置は Zero 2 W も同一 |
-| `display_manager.py` (101行) | 再実装 | DSI→HDMI で消灯方式が変わる |
+| `display_manager.py` (101行) | 再実装 | 2号機のパネルには GPIO バックライトの配線が無いため DPMS へ変わる |
 | `gui/` 一式 + `kv/*` (約780行) | 全面書き直し | Kivy 依存のため |
 | `main.py` (689行) | 再構成 | Kivy の App / Clock 依存を剥がす |
 
@@ -447,6 +451,9 @@ photo-frame の機能仕様を踏襲する。
 ### 7.2. 写真取得元との連携
 
 写真取得元は `PF_PHOTO_PROVIDER` で選択する（`immich`（既定）/ `gdrive` / `local` / `s3`）。
+ハードウェア関連の環境変数（`.env`）: `PF_DISPLAY_POWER`（`drm_dpms` 既定 / `gpio_backlight`）、
+`PF_BACKLIGHT_GPIO`（既定 26。`gpio_backlight` のときだけ）、`PF_MOTION_SENSOR_GPIO`（既定 18）。
+詳細は 2.3 と 8章の消灯方式を参照。1号機（Pi 3B + HDMI パネル）向け。ホスト直接操作・コンテナ（bind mount 構成）経由とも確認済み（2026-11-14。9章・8章参照）。
 
 **Immich 連携**
 
@@ -652,7 +659,8 @@ photo-frame では `transition` と `max_slides_in_memory` がどこからも参
     2026-09-03 の実機検証では検知範囲が想定より広く、`power_saving_timeout` を
     短くしても人がいる限り消灯しないことを確認した（仕様どおりの動作）。
 *   **消灯方式**: **ctypes 経由の DRM DPMS で確定**（第9章 9-1）。`display_manager.py` が実装する。
-    photo-frame が使用していた `vcgencmd display_power` は DSI 前提であり、
+    photo-frame は HDMI パネルのバックライトを GPIO 26 で切っていた（2号機のパネルにはその配線が無い）。
+    `vcgencmd display_power` は photo-frame の仕様書に案として挙がっていただけで実装されておらず、
     HDMI + Full KMS では終了コード 0 を返すだけで何も起きない。
     `fb0/blank` は SDL が DRM master を取ると無効になり、CEC はパネルが応答しない。
 
@@ -666,6 +674,40 @@ photo-frame では `transition` と `max_slides_in_memory` がどこからも参
 
     消灯中は fd と master を保持し続ける。省電力のタイマー判定は `DisplayManager` に
     含めず、`motion_sensor.py` との組み合わせとともに `main.py` が担う。
+
+*   **GPIO バックライト方式（任意。1号機向け。ホスト直接操作・コンテナ経由とも確認済み）**: 環境変数 `PF_DISPLAY_POWER` で
+    `drm_dpms`（既定。未設定時は2号機の現行動作と同じ）/ `gpio_backlight` を選ぶ。`gpio_backlight` は
+    `PF_BACKLIGHT_GPIO`（既定 26。1号機は config.txt に `gpio=26=op,dh`）を
+    High=点灯 / Low=消灯で操作し、DRM master は触らない。SDL の破棄→再生成の流れは
+    DPMS と同じで、復帰は「SDL 再生成 → バックライト High」の順（先に点けると
+    コンソールが一瞬見えるため）。GPIO は起動時に確保して消灯中も保持し、終了時は
+    High にしてから解放する。不正値は警告ログを出して既定値へ戻る。
+    **1号機の実機（Pi 3B、HDMI パネル EM101 1920x1200 + USB タッチ）での確認状況**
+    （2026-11-14、実機ホストへ SSH して直接操作。**本アプリは動かしていない**ため階層2相当の確認）:
+    -   確認済み: Full KMS（`dtoverlay=vc4-kms-v3d`）、`config.txt` に `gpio=26=op,dh`、
+        ホストで `gpioset`（libgpiod v2.2.1）により GPIO 26 の Low→High を2回行い、
+        目視で「Low で真っ暗、High ですぐ戻る」ことを確認（GPIO 26 だけで点け消しできる）。
+        release 後も出力値が保たれる（`pinctrl get 26` が `op lo` / `op hi` のまま。Low・High 双方）
+        ため、「終了時に High にしてから解放」で点灯したまま残る。GID は2号機と同じ
+        （gpio 986 / video 44 / input 996 / render 992）
+    -   **コンテナでの確認（2026-11-14、1号機の実機コンテナ＝階層3）**。方法: GHCR の
+        `ghcr.io/seizu-dev/raspi-photo-frame:latest` に未コミットの `main.py` / `src/` を
+        bind mount で重ねて起動。`.env` は `PF_DISPLAY_POWER=gpio_backlight` /
+        `PF_BACKLIGHT_GPIO=26` / `PF_MOTION_SENSOR_GPIO=17`。GID の変更は不要（2号機と同じ）
+        -   描画: KMSDRM / 1920x1200 / opengles2 / `ui_scale=1.88` / fps 55〜60
+        -   VmRSS: 起動時 約107MB、定常 約146MB（写真読み込み直後に一時 199MB）
+        -   バックライト（GPIO 26）とセンサー（GPIO 17）を同じ `/dev/gpiochip0` から確保できた
+        -   無操作消灯（GPIO 26 が Low）、タッチ復帰、人感センサー復帰のいずれも動作
+        -   復帰時の SDL 再生成は 0.34〜0.40 秒。目視で「点いてすぐ写真が映る」。
+            **1号機では `display_wakeup_delay` を設定画面から 3.0 秒より下げてよい**
+            （コードの既定 3.0 秒は変えない方針のまま）
+        -   終了時: 点灯中・消灯中のどちらで SIGTERM しても、終了後 GPIO 26 は High（点灯）で
+            残る（`pinctrl get 26` で確認）
+        -   運用上の注意: 1号機の Wi-Fi は不安定で、イメージ pull 中に Cloudflare Tunnel 経由の
+            SSH が10分以上つながらなくなった（環境固有）
+    -   未検証: DPMS でこのパネルが消えるか（試していない。gpio_backlight を選ぶ理由は
+        バックライト制御の方が復帰の反応が速いため。確認は不要）、
+        正式なイメージ（タグ付きリリース）での動作（今回は bind mount）
 
 *   **復帰後のウォームアップ**: **DPMS=On を送ってもパネルが映るまで約 2.0〜2.4 秒かかる**
     （実機実測）。この間に省電力タイマーを再開したりスライドを送ると、見えない時間が
@@ -763,7 +805,7 @@ SDL が master を握っている間、別 fd からの `drmSetMaster()` は
 
 | 方式 | アプリ非稼働時 | アプリ稼働中 | 備考 |
 |---|---|---|---|
-| `vcgencmd display_power 0` | ❌ 無効 | ❌ 無効 | **photo-frame が採用していた方式。Full KMS では機能しない。**<br>終了コードは 0 を返すが値が変化せず、`dpms` も `pixel` も変わらない |
+| `vcgencmd display_power 0` | ❌ 無効 | ❌ 無効 | **photo-frame の仕様書に案として挙がっていた方式（実装は GPIO 26 のバックライト制御）。Full KMS では機能しない。**<br>終了コードは 0 を返すが値が変化せず、`dpms` も `pixel` も変わらない |
 | `/sys/class/graphics/fb0/blank` | ✅ 消灯する | ❌ 無効 | fbcon 経由の制御であり、SDL が DRM master を取ると<br>fbcon が非アクティブになるため切り離される。root 権限も必要 |
 | `cec-ctl --standby` | ❌ | ❌ | パネルが CEC に応答しない（`Tx, Not Acknowledged, Max Retries`）。<br>`/dev/cec0` は存在するがパネル側が非対応 |
 

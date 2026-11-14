@@ -64,7 +64,7 @@ effort: medium
   - 秘匿情報（`config.py` / `settings.json`）がイメージに焼き込まれていないか
   - `requirements.txt` に足した依存が `Dockerfile` の apt 依存と対応しているか
 - **photo-frame の仕様・実装を前提として無検証で引き継いでいないか。**
-  先行プロジェクトは Pi 3 Model B + DSI 接続 + Kivy を前提としている。
+  先行プロジェクトは Pi 3 Model B + HDMI パネル（GPIO 26 でバックライト制御）+ Kivy を前提としている。
   Zero 2 W には DSI コネクタが無く、`vcgencmd display_power` などの前提も崩れる。
   「photo-frame でこうだったから」を根拠にしている箇所は、ハード差分を確認したかを問う。
 - **ライブラリの挙動を古い知識で断定していないか。**

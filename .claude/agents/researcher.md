@@ -42,11 +42,11 @@ effort: medium
   バージョンによって変わる。公式ドキュメントか PyPI/GitHub の実際のページを確認し、
   **確認したバージョン番号と情報源を必ず報告に含めること**。
 - **photo-frame の仕様・実装を、そのまま pi-photo-frame にも当てはまる事実として報告しない。**
-  先行プロジェクトは **Pi 3 Model B + DSI 接続タッチディスプレイ + Kivy** が前提である。
+  先行プロジェクトは **Pi 3 Model B + HDMI パネル（GPIO 26 でバックライト制御）+ Kivy** が前提である。
   Zero 2 W には **DSI コネクタが無く**、mini HDMI + USB タッチ構成になる。
-  Wi-Fi も 2.4GHz のみ、RAM は 512MB。`vcgencmd display_power` のような DSI/レガシー前提の
+  Wi-Fi も 2.4GHz のみ、RAM は 512MB。`vcgencmd display_power` のようなレガシー前提の
   手法は Zero 2 W + Full KMS でそのまま通用するとは限らない。
-  photo-frame を参照した調査結果には「これは Pi 3B + DSI 前提の記述である」と明記すること。
+  photo-frame を参照した調査結果には「これは Pi 3B + HDMI パネル + GPIO バックライト前提の記述である」と明記すること。
 - **検証は3階層ある。どの階層で確認したかを必ず報告に明記する。**
   1. Dev Container（x86 / `SDL_VIDEODRIVER=x11` / VNC）
   2. 実機ホスト直実行（ARM64 / `kmsdrm` / VideoCore IV / RAM 512MB）
