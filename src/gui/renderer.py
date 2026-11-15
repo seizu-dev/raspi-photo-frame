@@ -8,6 +8,12 @@ import pygame._sdl2.video as sdl2
 
 logger = logging.getLogger(__name__)
 
+# 文字テクスチャの最大寸法。VideoCore IV（Pi 3B / Zero 2 W）は 2048x2048 が上限で、
+# 超えると texture_from_surface が sdl2.error を投げてメインループごと落ちる。
+# pygame-ce 2.5.8 の Renderer にはレンダラ情報（SDL_GetRendererInfo）を取る API が
+# 無いため定数で持つ。
+MAX_TEXTURE_SIZE = 2048
+
 # display_manager.py / motion_sensor.py と同じ式。呼び出し側（main.py）が
 # IS_DEV_ENVIRONMENT でガードしてから wake_window 系を呼ぶ契約だが、
 # 実機で誤って呼ばれた場合に pg.display を開いて DRM master を握ってしまうと
@@ -83,6 +89,8 @@ class Renderer:
         # コンテキストなので、alive や generation には一切影響しない
         self._wake_surface: pg.Surface | None = None
         self._fonts: dict[int, pg.font.Font] = {}
+        # 上限超過の警告を出した文言（先頭40文字, サイズ）。同じ原因で出続けないための記録
+        self._clipped_logged: set[tuple[str, int]] = set()
         # 実機でどの入力イベント種別が実際に発生するかを確かめるための観測用集合。
         # FINGERMOTION が実機のタッチパネルで発生するかは未検証（Slider のドラッグ /
         # ScrollView のスクロールに関わる）。create() のたびにリセットする
@@ -349,6 +357,18 @@ class Renderer:
         if not text or not self.alive:
             return None
         surface = self.font(size).render(text, True, color)
+        # 安全網は texture_from_surface ではなく文字側に置く。写真は photo_cache が表示
+        # 解像度以下に確定済みで挙動を変えたくなく、上限超過が起きうるのは長い文言だけ。
+        # リサイズではなく切り取り（subsurface）なので「描画パスで縮小しない」に反しない。
+        w, h = surface.get_size()
+        if w > MAX_TEXTURE_SIZE or h > MAX_TEXTURE_SIZE:
+            key = (text[:40], size)
+            if key not in self._clipped_logged and len(self._clipped_logged) < 64:
+                self._clipped_logged.add(key)
+                logger.warning('文字テクスチャが最大寸法を超えたため切り取ります: '
+                               '%dx%d (先頭 %r)', w, h, text[:40])
+            surface = surface.subsurface(
+                pg.Rect(0, 0, min(w, MAX_TEXTURE_SIZE), min(h, MAX_TEXTURE_SIZE)))
         texture = self.texture_from_surface(surface)
         if texture is None:
             return None

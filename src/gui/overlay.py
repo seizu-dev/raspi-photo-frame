@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 import pygame as pg
 
 from src import i18n
+from src.gui.renderer import MAX_TEXTURE_SIZE
 from src.gui.text import Text
 from src.gui.widgets import COLOR_ACCENT
 
@@ -74,6 +75,9 @@ class Overlay:
 
         self._transient_until = 0.0
         self._status_text = ''
+        # ステータス文言の切り詰め結果のキャッシュ。(元の文言, 文字サイズ, 幅) -> 結果
+        self._status_fit_key: tuple[str, int, int] | None = None
+        self._status_fit_text = ''
         self._next_clock_at = 0.0
         self._next_memory_at = 0.0
         self._gen = -1
@@ -93,7 +97,11 @@ class Overlay:
 
     def set_status(self, message: str) -> None:
         """ 上部にトースト表示する。TRANSIENT_DURATION 秒で自動的に消える """
-        self._status_text = message
+        # ログには元の文言を残し、表示用だけ正規化する。Font.size() は改行を1行として
+        # 測るが render() は改行で複数行に描くため、高さがバーをはみ出す。NUL を含むと
+        # render() が ValueError を投げてメインループまで抜ける。ワーカースレッドからも
+        # 呼ばれるので、ここは文字列の代入だけに保つ（重い処理・描画は呼ばない）
+        self._status_text = ' '.join(message.replace('\x00', '').split())
         self._transient_until = time.monotonic() + TRANSIENT_DURATION
         logger.info('ステータス: %s', message)
 
@@ -337,7 +345,21 @@ class Overlay:
         self._r.fill_rect(pg.Rect(0, 0, width, bar_h), (0, 0, 0), alpha=130)
         if not self._status_text:
             return
-        self._status.set(self._status_text, int(self._config.get('comment_font_size', 24)))
+        size = int(self._config.get('comment_font_size', 24))
+        # 歯車（左上）と中央揃えの文言が重ならないよう、歯車の右端＋余白を左右対称に
+        # 引いた幅に収める。収めないと1行が VideoCore IV の最大テクスチャ寸法
+        # （2048px）を超え、Wi-Fi 断の例外文字列（数百文字）で描画が落ちる。
+        gear = self.gear_rect
+        max_width = width - (gear.right + self._r.px(GEAR_MARGIN)) * 2
+        # 2048px 超の幅の画面でも、Renderer.text_texture() の切り取り（安全網）より先に
+        # 切り詰めが効いて「…」が付くようにする
+        max_width = min(max_width, MAX_TEXTURE_SIZE)
+        # 毎フレーム二分探索しない。元の文言・サイズ・幅が変わったときだけ計算する
+        key = (self._status_text, size, max_width)
+        if key != self._status_fit_key:
+            self._status_fit_key = key
+            self._status_fit_text = self._fit(self._status_text, size, max_width)
+        self._status.set(self._status_fit_text, size)
         self._status.draw((width - self._status.width) // 2,
                           (bar_h - self._status.height) // 2, alpha=220)
 
