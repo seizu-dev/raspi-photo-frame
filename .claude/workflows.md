@@ -181,6 +181,10 @@ git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
 
+**検証用の pre-release（`vX.Y.Z-rc.N` のようにハイフンを含むタグ）は `latest` を更新しない**
+（GitHub Release も pre-release になる）。実機で試すときは `PF_IMAGE_TAG=X.Y.Z-rc.N`
+を指定して `docker compose pull` / `up -d` する。
+
 **GHCR パッケージは初回は非公開で作られる。** 実機からの pull が匿名のままで済むよう、
 GitHub の Package settings（リポジトリの Packages タブ）で Public に変更しておくこと。
 非公開のままだと実機で `docker login` が必要になる。
