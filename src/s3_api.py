@@ -15,9 +15,11 @@ S3 互換ストレージ（GCS の XML API・MinIO・R2 等）を写真取得元
 URL のパスとクエリは署名と同じ quote 規則で自分で組み立てる。
 
 **写真本体は原本を取得して `PhotoCache`（原本モード）へ渡す。** EXIF 補正・画素上限・
-JPEG の draft デコードは `PhotoCache` 側。HEIC/HEIF は原本をデコードすると 48MP で
-ピーク約602MB（PoC 実測）になり実機の RAM 416MB で成り立たないため、拡張子で除外して
-件数だけログに残す（ローカル取得元と同じ方針。S3 には縮小済みの手段が無い）。
+JPEG の draft デコードは `PhotoCache` 側。HEIC/HEIF は全体デコードすると 48MP で
+maxrss 約412〜602MB になり実機の RAM 416MB で成り立たないため、`PhotoCache` が
+`heif_decode`（libheif のタイル単位デコード。階層1の実測で約47MB）へ回す
+（ローカル取得元と同じ方針）。ここは拡張子で一覧に載せるだけで、libheif が使えない環境では
+従来どおり HEIC をスキップして件数だけログに残す。
 
 **アクセスキー・署名・Authorization ヘッダ・バケット名をログに出さない。** ログに残すのは
 キー（オブジェクト名）とステータスだけ。S3 のエラー本文は `<Message>` に署名の材料を
@@ -37,6 +39,7 @@ from urllib.parse import quote, urlsplit
 
 import requests
 
+from src import heif_decode
 from src.photo_provider import ProviderError
 from src.provider_util import b64d as _b64d
 from src.provider_util import b64e as _b64e
@@ -58,8 +61,9 @@ MAX_ORIGINAL_BYTES = 40 * 1024 * 1024
 LIST_MAX_KEYS = 1000
 MAX_LIST_PAGES = 200
 
-IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp')
-SKIPPED_EXTENSIONS = ('.heic', '.heif')
+# HEIC/HEIF は libheif が使えるときだけ一覧に載せる（`_split_images`。モジュール冒頭参照）
+HEIF_EXTENSIONS = ('.heic', '.heif')
+IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp') + HEIF_EXTENSIONS
 
 ROOT_ALBUM_ID = 'r'
 COVER_ID = 'cover'
@@ -282,7 +286,10 @@ class S3API:
         return os.path.splitext(key)[1].lower()
 
     def _split_images(self, objects: list[dict[str, str]]) -> tuple[list[dict[str, str]], int]:
-        """ 対応画像だけを名前順で返す（隠しファイルは除く）。HEIC の件数も返す """
+        """
+        対応画像だけを名前順で返す（隠しファイルは除く）。
+        libheif が使えずスキップした HEIC の件数も返す。
+        """
         images: list[dict[str, str]] = []
         skipped = 0
         for obj in objects:
@@ -290,7 +297,7 @@ class S3API:
             if name.startswith('.'):
                 continue
             ext = self._ext(name)
-            if ext in SKIPPED_EXTENSIONS:
+            if ext in HEIF_EXTENSIONS and not heif_decode.available():
                 skipped += 1
             elif ext in IMAGE_EXTENSIONS:
                 images.append(obj)
@@ -455,7 +462,7 @@ class S3API:
         images, skipped = self._split_images(objects)
         album_name = _display(album_name)
         if skipped:
-            logger.info('HEIC/HEIF は原本をデコードしないためスキップしました: %d 件 (%s)',
+            logger.info('libheif を使えないため HEIC/HEIF をスキップしました: %d 件 (%s)',
                         skipped, album_name or album_id[:40])
         assets: list[dict[str, Any]] = []
         for obj in images:

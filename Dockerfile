@@ -11,10 +11,18 @@ FROM python:3.13-slim AS base
 #   fonts-noto-cjk    : 写真の説明文表示（7.2）で日本語を描画するため。
 #                        実ファイルは /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
 #                        （2026-09-02 に実機のイメージ内で確認済み。photo-frame と同じパス）
+#   libheif1          : HEIC/HEIF のタイル単位デコード（src/heif_decode.py が ctypes で
+#                        libheif.so.1 を直接叩く。ローカル / S3 取得元の HEIC 用。Pillow の
+#                        プラグインは使わない）。libheif 1.23 以降の API（plane_readonly2 等）が
+#                        前提で、Debian trixie の 1.23.6 で確認した
+#   libheif-plugin-libde265 : HEVC のデコーダ。libheif1 本体には含まれず、
+#                        --no-install-recommends では入らないため明示する（無いと HEIC を
+#                        開いてもデコードで失敗する）。AVIF 用の dav1d プラグインは入れない
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libsdl2-2.0-0 libsdl2-image-2.0-0 libsdl2-ttf-2.0-0 \
       libdrm2 libgbm1 libegl1 libgles2 \
       fonts-noto-cjk \
+      libheif1 libheif-plugin-libde265 \
  && rm -rf /var/lib/apt/lists/*
 
 # uid/gid 1000 の非rootユーザーを作成する。実証済みの --user 1000:1000 に合わせる。

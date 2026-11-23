@@ -138,7 +138,8 @@ Immich からの画像取得は帯域制約を前提とし、**原寸画像を�
     再帰しない。`/` で終わるサイズ0のフォルダ用オブジェクト（コンソールで作ったフォルダ）
     と `.` 始まりの名前は除外する。
 *   **写真ソース**: 指定アルバム / デイリーピックアップのみ（`supports_favorites = False`）。
-*   **対応形式・画像の取得**: ローカルと同じ（JPEG / PNG / WebP。HEIC/HEIF はスキップ。
+*   **対応形式・画像の取得**: ローカルと同じ（JPEG / PNG / WebP / HEIC / HEIF。HEIC/HEIF は
+    タイル単位デコード〈9-12〉。libheif が使えない環境ではスキップ。
     原本モードで、形式別の画素上限・EXIF の向き補正・quality 95 / 4:4:4）。原本は
     ストリーミングで取得し 40MB を超えたら中断する。
     40MB 超で弾いたキーはプロセス内で記憶し再取得しない。**画素上限で弾かれた原本は
@@ -506,13 +507,19 @@ photo-frame の機能仕様を踏襲する。
     シンボリックリンクは無視する。
 *   **写真ソース**: 指定アルバム / デイリーピックアップのみ（**お気に入りには対応しない**。
     `supports_favorites = False`）。
-*   **対応形式**: JPEG / PNG / WebP。**HEIC/HEIF はスキップする**（原本のデコードが
-    48MP でピーク約602MB になり実機 RAM で成り立たない。9-11 参照。ローカルには
-    Drive の `thumbnailLink` のような縮小済みの手段が無い）。
+*   **対応形式**: JPEG / PNG / WebP / HEIC / HEIF。**HEIC/HEIF は libheif のタイル単位
+    デコードで扱う**（全体デコードは 48MP でピーク約602MB になり実機 RAM で成り立たないが、
+    grid の各タイルをデコード→即縮小→キャンバスへ貼れば階層1で maxrss 約49MB。9-12 参照。
+    **実機での測定は未実施**）。brand（`ftyp`）で判定し拡張子には依存しない（`.heic` /
+    `.heif` を一覧に載せる）。向きは `irot` / `imir`、撮影日は HEIF の Exif ブロック。
+    libheif（`libheif1` + HEVC プラグイン `libheif-plugin-libde265`）が無い環境では
+    従来どおりスキップする。AVIF は対象外。Drive は従来どおり `thumbnailLink` 経由で、
+    原本の HEIC はデコードしない。
 *   **画像の取得**: 原本モード（`delivers_originals = True`）。EXIF の向き補正・
     画素上限・quality 95 / 4:4:4 は Drive の原本経路と同じ。
-*   **撮影日時**: EXIF `DateTimeOriginal` のみ。無ければ表示しない。
-*   **画素上限**: 形式別（JPEG 40MP / PNG 12MP / WebP 8MP。ただしアニメーション WebP と `WebPDecode` が使えない場合は 4MP。9-11 参照）
+*   **撮影日時**: EXIF `DateTimeOriginal` のみ。無ければ表示しない（HEIC は Exif ブロックから）。
+*   **画素上限**: 形式別（JPEG 40MP / PNG 12MP / WebP 8MP。HEIC はこの表の対象外で、
+    タイル1枚 12MP / 全体 100MP / キャンバス 16MP を超えるとサムネイルへ倒す〈仮置き。9-12〉。ただしアニメーション WebP と `WebPDecode` が使えない場合は 4MP。9-11 参照）
     を超える PNG/WebP はデコード前にスキップする（撮影日の読み取りも同じ上限で抑止）。
 *   **更新の反映**: `rescan_on_load = True` のため、写真リストは読み込みのたびに
     走査し直す（キャッシュが有効期間内でも使わない。失敗・空なら失効キャッシュへ
@@ -1076,7 +1083,7 @@ video=HDMI-A-1:1024x600MR@50e
 | `imageMediaMetadata.width/height` | **EXIF/HEIF の回転を適用する前の値**（回転後ではない） |
 | `imageMediaMetadata.rotation` | 90° 単位の回転回数（0〜3。度数ではない） |
 | `imageMediaMetadata.time` | 書式は `YYYY:MM:DD HH:MM:SS`。無いことがある（その場合は撮影日を表示しない） |
-| HEIC の原本を Pillow でデコードした場合のピークメモリ | **48MP で約602MB、20MP で約211MB**（実機 RAM 416MB では成り立たない） |
+| HEIC の原本を Pillow でデコードした場合のピークメモリ | **48MP で約602MB、20MP で約211MB**（実機 RAM 416MB では成り立たない）。ローカル / S3 のタイル単位デコードは 9-12 |
 | `thumbnailLink` に `=wW-hH` を付けた場合 | Drive 側で **EXIF/HEIF の回転を適用したうえで、アスペクト比を保って W×H に収まる寸法**へ縮小して返す。HEIC も JPEG/PNG へ変換される。**認可ヘッダ無しでも取得できる署名付き URL**（有効期限は数時間） |
 | JPEG の原本を `draft('RGB',(1024,600))` した場合 | 縦長の写真では縮小されなかった（`draft()` は「要求サイズ以上になる最小の縮小率」を選ぶため、回転前の軸のまま要求すると取り違える） |
 | `exif_transpose()` の副作用 | 回転が無くても画像を複製し、ピークメモリが約20MB増える |
@@ -1196,6 +1203,40 @@ Pillow のバッファと、同じ画像が複数回複製されるため約15MB
 （subsampling=0）に上げると 33.9dB / 38.6dB に改善する**（キャッシュ1枚は
 約1.75倍、88KB→155KB）。原本モード（`originals=True`）の写真本体だけこの設定を
 使う（Immich 側は変えない。`.claude/architecture.md`「対で更新が必要な箇所」参照）。
+
+### 9-12. HEIC/HEIF のタイル単位デコード（ローカル / S3 取得元） — 【階層1で確認済み・実機は未測定】
+
+2026-11-23、ブランチ `feat/heic-tiled-decode`。`src/heif_decode.py`（libheif を ctypes で
+叩く）の検証。**以下はすべて階層1（x86 Dev Container）の値。実機（階層2・3）では未測定で、
+上限値（タイル1枚 12MP / 全体 100MP / キャンバス 16MP）は仮置きのまま。**
+サンプルは iPhone の HEIC（8064x6048 の grid 9x6、タイル 896x1024、`irot` = 270 で
+見た目は 6048x8064 の縦長、ほかに HDR のゲインマップ等の補助画像あり）。libheif は
+Debian trixie の 1.23.6（`libheif.so.1`）。
+
+| 項目 | 結果（階層1） |
+|---|---|
+| 全体デコード（`heif_decode_image`、RGB 8bit、48MP）の maxrss | **約238MB**（先行 PoC の記録は約412MB。測定方法が異なる）。実機 RAM 416MB では他と合わせて成り立たない |
+| タイル単位デコード＋整数倍縮小の maxrss（`PhotoCache.store_photo()`、別プロセス） | **約49MB**（`photo_cache` の import だけで約21MB。コピー済み bytes 入力で約56MB、cover で約61〜68MB）。写真本体・表紙とも同程度 |
+| 所要時間（x86） | 写真本体 約2.8〜5.1秒、表紙 約2.4〜3.0秒。**Zero 2 W ではさらに数倍かかると見込まれるが未測定** |
+| 向き補正の正しさ | 全体デコード（libheif 自身が `irot` / `imir` を適用）に対し、縮小率 1/2・1/4・1/16 で**画素差 0**。`irot` の 0/90/180/270 と `imir` の縦・横を、サンプルの `irot` ボックスをバイト置換した派生ファイルで確認（6通りとも差 0） |
+| `process_image_transformations=1` のタイル座標 | サンプルで実際に正しく並ぶ位置と一致しなかった（返るオフセットは `(0, 928)`、正しくは x=96, y=0 相当。原因不明）。変換なしの座標＋`ignore_transformations=1` でデコードして自前で向きを補正する方針とした |
+| タイルごとに任意倍率で LANCZOS 縮小した場合 | 倍率 0.2 で全体を一括で縮めた結果と**平均 2.3/255 食い違い**、タイル内で境界から離れるほど増えた（境界の位相ずれ）。整数分の1（`Image.reduce`。N はタイルの縦横の最大公約数の約数）にすると一致する |
+| キャッシュ出力（1024x600 contain、JPEG q95 4:4:4）と、全体デコード→縮小の基準との差 | 平均 1.2〜1.6/255（JPEG の往復誤差 1.0〜1.5 とフィルタの差 0.3 で説明できる範囲）。見た目の確認でも継ぎ目は無い |
+| 単一タイル経路（grid でない画像） | 全体を1回でデコードする経路が grid 経路と画素差 0（実在する単一画像のサンプルが無く、同じファイルでタイル数を1に偽装して確認。埋め込みサムネイル（thmb）は単独でデコードできた） |
+| 上限・異常系 | タイル上限・全体上限・キャンバス上限の超過はいずれも thmb へ（全体上限超過はスキップ）。壊れたデータ・途中で切れたファイルは None を返しスキップ。libheif が使えない環境では一覧から外れる（ローカル / S3 とも確認） |
+| EXIF（撮影日） | HEIF の Exif ブロック（先頭4バイトのオフセットを除去）を `parse_exif_date()` へ渡して読めた。`heif_image_handle_get_list_of_metadata_block_IDs()` は **NULL による個数問い合わせができず**（0 を返す）、`..._get_number_of_metadata_blocks()` で個数を先に取る必要がある |
+| 既存経路の出力 | JPEG（EXIF 回転あり）/ PNG / WebP の写真本体・表紙を、`originals` の True / False と contain / cover / smart の全組み合わせ（バイト列・Path 入力）で**変更前（HEAD）とバイト単位で一致**（48通り） |
+
+**構造体の根拠**: libheif v1.23.6 の公式ヘッダ（`libheif/api/libheif/heif_tiling.h` /
+`heif_decoding.h` / `heif_properties.h` / `heif_metadata.h` / `heif_image.h`）。
+`heif_image_tiling` は `top_offset` / `left_offset` の順（変換なしでは常に 0）、
+`heif_decoding_options` は先頭が `uint8 version` / `uint8 ignore_transformations`
+（以降は版ごとに成長するため `heif_decoding_options_alloc()` で確保する）。
+
+**残課題（実機で測る）**: ①タイル単位デコードの所要時間・ピークメモリ（階層3、
+アプリ稼働中）、②3つの上限の妥当性、③10bit・HDR・アルファ付きの HEIC の挙動
+（階層1でも未確認。RGB 8bit interleaved を要求して libheif に変換させる想定）、
+④Android（Samsung 等）の HEIC のタイル寸法。
 
 ---
 

@@ -355,7 +355,7 @@ GDRIVE_ROOT_FOLDER_ID=<the folder ID from step 5>
 - An album's cover is the first image in the folder, sorted by name.
 
 Details on how HEIC/HEIF are handled (and why) are in section 9-11 of
-[SPECIFICATION.md](SPECIFICATION.md).
+[SPECIFICATION.md](SPECIFICATION.md) (a local folder and S3 use a different method; see 9-12).
 
 ## Appendix: Using a local folder as the photo source
 
@@ -388,8 +388,11 @@ Add or remove photos on the host side (`scp` / `rsync` / a Samba share, etc.).
 
 ### Limitations
 
-- Supported formats: JPEG, PNG, WebP. HEIC/HEIF, and PNG files over 12 MP or WebP
-  files over 8 MP, are not shown.
+- Supported formats: JPEG, PNG, WebP, HEIC, HEIF. PNG files over 12 MP or WebP files
+  over 8 MP are not shown. HEIC/HEIF are read with libheif one tile at a time, shrinking
+  each tile as it goes (to keep memory low; processing time on the device has not been
+  measured and each photo may take a while). See section 9-12 of
+  [SPECIFICATION.md](SPECIFICATION.md).
 - There is no "favorites" source with a local folder — only album and daily-pickup
   selection are available.
 - The capture date is shown only when the photo has it in EXIF.
@@ -429,8 +432,9 @@ Folders under a bucket (or a prefix inside it) are read as albums.
 
 ### Limitations
 
-- Supported formats: JPEG, PNG, WebP. HEIC/HEIF and images that are too large are
-  not shown.
+- Supported formats: JPEG, PNG, WebP, HEIC, HEIF. Images that are too large (in pixels or
+  file size) are not shown. HEIC/HEIF are handled the same way as for a local folder
+  (see above).
 - There is no "favorites" source — only album and daily-pickup selection are available.
 - The capture date is shown only when the photo has it in EXIF.
 - Photos added to the bucket appear after the cached photo list expires.

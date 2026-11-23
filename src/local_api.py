@@ -10,10 +10,12 @@
 デコードを行うため、ここではファイルを開かない（撮影日の取得だけはヘッダの
 EXIF を読むが、画素はデコードしない）。
 
-**HEIC/HEIF は対象外。** 原本をデコードすると 48MP でピーク約602MB
-（PoC 実測）になり、実機の RAM 416MB では成り立たないため、拡張子で除外して
-件数だけログに残す（Drive と同じ方針。Drive は thumbnailLink の変換で救えるが、
-ローカルには縮小済みの手段が無い）。
+**HEIC/HEIF は `heif_decode`（libheif のタイル単位デコード）で扱う。** 全体デコードは
+48MP で maxrss 約412〜602MB になり実機の RAM 416MB では成り立たないが、タイルを1枚ずつ
+デコードして縮小すれば約47MB に収まる（階層1の実測）。デコードそのものは `PhotoCache`
+が brand で判定して `heif_decode` へ回すので、ここは拡張子で一覧に載せ、撮影日だけ
+`heif_decode.read_exif()` で読む（画素はデコードしない）。libheif が使えない環境
+（ライブラリ無し等）では従来どおり HEIC をスキップして件数だけログに残す。
 
 **ファイルは読み取り専用で扱い、書き込み・削除はしない。** 追加依存は無い。
 """
@@ -28,6 +30,7 @@ from typing import Any, Callable
 
 from PIL import Image, UnidentifiedImageError
 
+from src import heif_decode
 from src.photo_cache import original_pixel_limit
 from src.photo_provider import ProviderError
 from src.provider_util import b64d as _b64d
@@ -43,9 +46,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_CONTAINER_ROOT = '/photos'
 DEFAULT_DEV_ROOT = './photos'
 
-# 原本経路で扱ってよい拡張子（小文字）。HEIC/HEIF は含めない（モジュール冒頭参照）
-IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp')
-SKIPPED_EXTENSIONS = ('.heic', '.heif')
+# 原本経路で扱ってよい拡張子（小文字）。HEIC/HEIF は libheif が使えるときだけ
+# 一覧に載せる（`_scan_dir`。モジュール冒頭参照）
+HEIF_EXTENSIONS = ('.heic', '.heif')
+IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp') + HEIF_EXTENSIONS
 
 # ルートを表すアルバム ID。フォルダ ID は必ず 'd.' か 'h.' で始まるので衝突しない
 ROOT_ALBUM_ID = 'r'
@@ -129,6 +133,7 @@ class LocalFolderAPI:
     def _scan_dir(self, directory: Path) -> tuple[list[Path], list[Path], int]:
         """
         directory 直下を走査し (サブフォルダ, 対応画像, スキップした HEIC 数) を名前順で返す。
+        スキップした HEIC は libheif が使えないときだけ（使えるなら対応画像に含める）。
         隠しエントリ（'.' 始まり）とルート外を指すものは無視する。OSError は呼び出し側へ。
         """
         folders: list[Path] = []
@@ -150,7 +155,7 @@ class LocalFolderAPI:
             except OSError:
                 continue
             ext = os.path.splitext(entry.name)[1].lower()
-            if ext in SKIPPED_EXTENSIONS:
+            if ext in HEIF_EXTENSIONS and not heif_decode.available():
                 skipped += 1
             elif ext in IMAGE_EXTENSIONS:
                 if self._inside_root(path):
@@ -287,10 +292,15 @@ class LocalFolderAPI:
         あるバイト列だけを `Exif.load()` で解析する（JPEG / WebP / PNG の eXIf が
         IDAT より前にあるもの。IDAT の後ろにある eXIf は読まず空文字になる）。
         画素上限（形式別。`original_pixel_limit`）を超える画像は開いたあとでも
-        日付を読まない。Image.open() が投げる DecompressionBombError（OSError 系
+        日付を読まない。HEIC/HEIF は `heif_decode.read_exif()`（メタデータのみ）で読む。
+        Image.open() が投げる DecompressionBombError（OSError 系
         ではない）や警告で一覧全体を壊さないため、想定外の例外も握る。
         """
         try:
+            if os.path.splitext(path.name)[1].lower() in HEIF_EXTENSIONS:
+                # Pillow は HEIC を開けない。画素をデコードせず Exif ブロックだけ読む
+                raw_exif = heif_decode.read_exif(path)
+                return parse_exif_date(raw_exif) if raw_exif else ''
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore', Image.DecompressionBombWarning)
                 with Image.open(path) as img:
@@ -372,7 +382,7 @@ class LocalFolderAPI:
 
         album_name = _display(album_name)
         if skipped:
-            logger.info('HEIC/HEIF は原本をデコードしないためスキップしました: %d 件 (%s)',
+            logger.info('libheif を使えないため HEIC/HEIF をスキップしました: %d 件 (%s)',
                         skipped, album_name or album_id[:40])
 
         assets: list[dict[str, Any]] = []
