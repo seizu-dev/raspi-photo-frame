@@ -359,6 +359,24 @@ src/
     `photo_source.load_list()` から呼ぶ）もこの組に含まれる。** キーの作り方を
     変えると掃除の接頭辞（`daily_pickup_`）が合わなくなって空振りし、
     JSON が日付ごとに溜まり続ける
+-   `heif_decode.py` の `DECODE_THREADS`（タイルの並行デコード。**仮置きの 2**。実機で
+    1〜4 を測って決める）↔ **メモリのピーク**（スレッドごとに libheif の context と
+    デコーダの作業領域を持つため、増分は「タイル1枚×スレッド数」より大きい。階層1で
+    1 → 4 スレッドが 41 → 65MB、縮小率 1/4 で 53 → 98MB）↔ **描画 fps**（デコードで
+    CPU を使い切ると描画が落ちうる。`PRESENT_YIELD_SEC` の項と同じ GIL・CPU の取り合い。
+    実機で fps を測ること）↔ `photo_cache.py` の `_DECODE_LOCK`（プロセス全体で1枚ずつ
+    は維持する。並行化は「1枚の中のタイル」だけで、複数枚の同時デコードではない）。
+    スレッドごとに context を開くのは同一 context の同時デコードの安全性を確認できて
+    いないため（共有に戻さない）。`decode()` は毎回この定数を参照する（ベンチは
+    モンキーパッチで差し替える。環境変数の口は作らない）
+-   `heif_decode.py` の `decode()` の thmb 採用条件（thmb の寸法が `min_scale` × 原寸を
+    縦横とも満たす）↔ `photo_cache.py` の `_encode_heif()` が渡す `need` ↔ 表紙の
+    `THUMBNAIL_MAX_SHORT_SIDE`（250px）。表紙（短辺 250px）は多くの HEIC で thmb
+    （iPhone で 432x576）で足り、タイルをデコードしない（約 2.8秒 → 0.1秒。階層1）。
+    **表紙専用の分岐ではなく写真本体にも同じ判定が掛かる**（1024x600 contain は
+    thmb の高さが足りずタイル経路）。`THUMBNAIL_MAX_SHORT_SIDE` を上げると thmb で
+    足りなくなり表紙が再びタイル経路（実機 26秒）になる。上限超過時に thmb へ倒す
+    経路（`_decode_thumbnail_fallback`）とはログで区別する
 -   `photo_cache.py` の `display_size` ↔ 実機の表示解像度 1024x600
     （解像度を変えたらキャッシュ済みの画像はすべて作り直しになる）
 -   `settings.json` の `photo_fit` ↔ `config_manager.py` の既定値 ↔

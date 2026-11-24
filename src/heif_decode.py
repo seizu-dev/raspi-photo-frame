@@ -38,6 +38,7 @@ import ctypes as C
 import logging
 import math
 import threading
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +58,15 @@ MAX_TOTAL_PIXELS = 100_000_000
 # なるが、タイルの縦横の公約数が小さい特殊な HEIC では縮小率を大きく取れずキャンバスが
 # 原寸に近づく。そのときは thmb へ倒してメモリを守る。
 MAX_CANVAS_PIXELS = 16_000_000
+
+# タイルの並行デコードのスレッド数。**仮置き。実機（Zero 2 W は4コア）で 1〜4 を測って
+# 決めること。** 1 ならスレッドを作らず従来の逐次経路と同じに動く。`decode()` は毎回この
+# モジュール定数を参照する（テスト・ベンチはモンキーパッチで差し替える）。
+# 実機の1スレッドは HEVC デコードが1コアで律速し 48MP で約26〜30秒かかった。libheif への
+# ctypes 呼び出し（`C.CDLL`）は呼び出し中 GIL を解放するので、Python スレッドでも
+# 複数コアを使える。一方でスレッドを増やすと CPU を使い切って描画 fps を落としうる
+# （`.claude/architecture.md` 参照）。
+DECODE_THREADS = 2
 
 # HEVC 系の brand（ftyp の major / compatible のどれかにあれば HEIC とみなす）。
 # AVIF（brand が avif / avis）は AV1 デコーダ（dav1d プラグイン）を入れないので対象外。
@@ -112,6 +122,8 @@ _SIGNATURES: list[tuple[str, Any, list[Any]]] = [
     ('heif_context_get_primary_image_handle', _HeifError, [_VP, C.POINTER(_VP)]),
     ('heif_image_handle_release', None, [_VP]),
     ('heif_image_handle_get_item_id', C.c_uint32, [_VP]),
+    ('heif_image_handle_get_width', C.c_int, [_VP]),
+    ('heif_image_handle_get_height', C.c_int, [_VP]),
     ('heif_image_handle_get_image_tiling',
      _HeifError, [_VP, C.c_int, C.POINTER(_Tiling)]),
     ('heif_image_handle_decode_image_tile',
@@ -228,8 +240,10 @@ class HeifImage:
     使う）。メタデータ（`size` / `exif()`）は画素をデコードしないので軽い。
     """
 
-    def __init__(self, lib: Any, ctx: Any, handle: Any, keep: Any) -> None:
+    def __init__(self, lib: Any, ctx: Any, handle: Any, keep: Any,
+                 source: 'bytes | Path | None' = None) -> None:
         self._lib = lib
+        self._source = source  # 並行デコードでスレッドごとに開き直すための入力
         self._ctx = ctx
         self._handle = handle
         self._keep = keep  # read_from_memory_without_copy で渡したメモリの生存を保つ
@@ -373,9 +387,13 @@ class HeifImage:
         （`PhotoCache._shrink()`）が行うので、ここで返す寸法は必要寸法の1〜2倍程度になる。
         失敗（デコーダ無し・壊れたタイル・上限超過で thmb も無い）は None。
 
+        - **埋め込みサムネイル（thmb）が必要寸法を満たすなら、それだけをデコードして返す**
+          （表紙の短辺 250px など。48MP のタイルを全部デコードするより桁違いに速い）。
+          表紙専用の分岐ではなく、写真本体にも同じ判定を掛ける。
         - 通常はタイルを1枚ずつデコード -> 整数倍で縮小（`Image.reduce`。BOX 平均）->
           キャンバスへ貼る（常駐はタイル1枚＋キャンバス）。grid でない画像はタイル1枚
-          （＝全体）として同じ経路を通る。
+          （＝全体）として同じ経路を通る。`DECODE_THREADS` が 2 以上なら、タイル1枚ぶんの
+          処理（デコード・crop・reduce）を並行に行う（`_decode_tiles_parallel`）。
         - **縮小は整数倍にする。** タイルごとに任意の倍率で LANCZOS をかけると、タイルの
           寸法が倍率で割り切れず境界の画素の位置がタイルごとにずれる（階層1の実測:
           倍率 0.2 で全体を一括で縮めた結果と平均 2.3/255 食い違い、タイル内で
@@ -390,12 +408,20 @@ class HeifImage:
         try:
             w, h = self.raw_size
             tw, th = self.tile_size
+            # 必要寸法（見た目の向き）は min_scale × 原寸。式は下の縮小率 N の決定と同じ min_scale
+            thumb = self._best_thumbnail()
+            if thumb is not None and min_scale < 1.0:
+                vis_w, vis_h = self.size
+                if thumb[1] >= min_scale * vis_w - 1e-6 and thumb[2] >= min_scale * vis_h - 1e-6:
+                    logger.info('HEIC の埋め込みサムネイル（%dx%d）が必要寸法を満たすため、'
+                                'タイルをデコードせずサムネイルを使います', thumb[1], thumb[2])
+                    return self._decode_thumbnail(thumb[0])
             if w * h > MAX_TOTAL_PIXELS:
                 logger.warning('HEIC の画素数が上限を超えているためスキップします: %dx%d '
                                '(上限 %dMP)', w, h, MAX_TOTAL_PIXELS // 1_000_000)
                 return None
             if tw * th > MAX_TILE_PIXELS:
-                return self._decode_thumbnail()
+                return self._decode_thumbnail_fallback()
             want = max(1, int(1.0 / max(min(min_scale, 1.0), 1e-6) + 1e-9))
             if self.is_tiled:
                 g = math.gcd(tw, th)
@@ -406,49 +432,172 @@ class HeifImage:
             if cw * ch > MAX_CANVAS_PIXELS:
                 logger.info('HEIC のタイル寸法が縮小に向かないため埋め込みサムネイルを使います: '
                             'tile=%dx%d', tw, th)
-                return self._decode_thumbnail()
+                return self._decode_thumbnail_fallback()
             canvas = Image.new('RGB', (cw, ch))
             cols, rows = self._tiling.num_columns, self._tiling.num_rows
-            for ty in range(rows):
-                for tx in range(cols):
-                    tile = self._decode_to_image(self._handle,
-                                                 (tx, ty) if self.is_tiled else None)
-                    # 画像右端・下端のタイルは画像外へはみ出す。貼る範囲は画像内に収める
-                    x0, y0 = tx * tw, ty * th
-                    vw, vh = min(tile.width, w - x0), min(tile.height, h - y0)
-                    if vw <= 0 or vh <= 0:
-                        continue
-                    if (vw, vh) != tile.size:
-                        tile = tile.crop((0, 0, vw, vh))
-                    if n > 1:
-                        tile = tile.reduce(n)
-                    canvas.paste(tile, (x0 // n, y0 // n))
-                    del tile
+            coords = [(tx, ty) for ty in range(rows) for tx in range(cols)]
+            threads = min(int(DECODE_THREADS), len(coords))
+            if threads <= 1 or not self.is_tiled:
+                for tx, ty in coords:
+                    self._paste(canvas, self._decode_tile(self._handle, tx, ty, n))
+            else:
+                self._decode_tiles_parallel(canvas, coords, n, threads)
             return self._apply_transforms(canvas)
         except (OSError, MemoryError, ValueError) as e:
             logger.warning('HEIC をデコードできませんでした: %s', e)
             return None
 
-    def _decode_thumbnail(self) -> Image.Image | None:
-        """ 埋め込みサムネイル（thmb）をデコードする。無ければ None """
+    def _decode_tile(self, handle: Any, tx: int, ty: int,
+                     n: int) -> tuple[int, int, Image.Image] | None:
+        """
+        タイル1枚ぶんの処理（デコード -> 画像外へはみ出す分を crop -> `reduce(n)`）。
+        貼る位置（縮小後のキャンバス座標）と縮小済みタイルを返す。画像外なら None。
+        ワーカースレッドから呼ばれるので、キャンバスには触らない（貼るのは呼び出し元だけ）。
+        """
+        w, h = self.raw_size
+        tw, th = self.tile_size
+        tile = self._decode_to_image(handle, (tx, ty) if self.is_tiled else None)
+        # 画像右端・下端のタイルは画像外へはみ出す。貼る範囲は画像内に収める
+        x0, y0 = tx * tw, ty * th
+        vw, vh = min(tile.width, w - x0), min(tile.height, h - y0)
+        if vw <= 0 or vh <= 0:
+            return None
+        if (vw, vh) != tile.size:
+            tile = tile.crop((0, 0, vw, vh))
+        if n > 1:
+            tile = tile.reduce(n)
+        return x0 // n, y0 // n, tile
+
+    @staticmethod
+    def _paste(canvas: Image.Image, done: tuple[int, int, Image.Image] | None) -> None:
+        """ `_decode_tile()` の結果をキャンバスへ貼る（呼び出し元スレッドだけが呼ぶ） """
+        if done is not None:
+            canvas.paste(done[2], (done[0], done[1]))
+
+    def _decode_tiles_parallel(self, canvas: Image.Image, coords: list[tuple[int, int]],
+                               n: int, threads: int) -> None:
+        """
+        タイルを `threads` 本のワーカーで並行にデコードし、結果は呼び出し元スレッドが貼る。
+
+        - **スレッドごとに libheif の context / handle を開く。** 同一 context への同時デコードの
+          スレッド安全性を libheif のドキュメントで確認できていないため、共有しない。
+          Path 入力はスレッドごとにファイルを開き、bytes 入力は同じバッファを
+          `read_from_memory_without_copy` で共有する（`self._keep` が生存を保つ。読み取り専用）。
+        - 同時に処理中（デコード中＋貼り待ち）のタイルを「スレッド数+1」に制限する。
+          全タイルを投入すると完成済みタイルが溜まってメモリが膨らむため。
+        - 1枚でも失敗したら例外を送出する（呼び出し元が None にする）。`finally` で必ず
+          全ワーカーの終了を待ってから context を解放する（リーク・解放済み handle の
+          使用を避ける）。
+        """
+        local = threading.local()
+        opened: list[tuple[Any, Any]] = []
+        opened_lock = threading.Lock()
+
+        def thread_handle() -> Any:
+            handle = getattr(local, 'handle', None)
+            if handle is None:
+                ctx, handle = _open_handle(self._lib, self._source, self._keep)
+                with opened_lock:
+                    opened.append((ctx, handle))
+                local.handle = handle
+            return handle
+
+        def job(tx: int, ty: int) -> tuple[int, int, Image.Image] | None:
+            return self._decode_tile(thread_handle(), tx, ty, n)
+
+        pool = ThreadPoolExecutor(max_workers=threads, thread_name_prefix='heif-tile')
+        pending: set[Future] = set()
+        try:
+            for tx, ty in coords:
+                while len(pending) >= threads + 1:
+                    done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for f in done:
+                        self._paste(canvas, f.result())
+                pending.add(pool.submit(job, tx, ty))
+            while pending:
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                for f in done:
+                    self._paste(canvas, f.result())
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+            for ctx, handle in opened:
+                self._lib.heif_image_handle_release(handle)
+                self._lib.heif_context_free(ctx)
+
+    def _best_thumbnail(self) -> tuple[int, int, int] | None:
+        """
+        埋め込みサムネイルのうち最大のもの `(thumbnail ID, 幅, 高さ)` を返す（無ければ None）。
+        寸法は画素をデコードせず handle から取る（見た目の向きの値。サンプルで確認済み）。
+        """
         lib = self._lib
         n = lib.heif_image_handle_get_number_of_thumbnails(self._handle)
         if n <= 0:
-            logger.warning('HEIC のタイルが大きすぎ、サムネイルも無いためスキップします')
             return None
         ids = (C.c_uint32 * n)()
         n = lib.heif_image_handle_get_list_of_thumbnail_IDs(self._handle, ids, n)
+        best: tuple[int, int, int] | None = None
+        for i in range(max(n, 0)):
+            thumb = C.c_void_p()
+            err = lib.heif_image_handle_get_thumbnail(self._handle, ids[i], C.byref(thumb))
+            if err.code != 0:
+                continue
+            try:
+                tw = lib.heif_image_handle_get_width(thumb)
+                th = lib.heif_image_handle_get_height(thumb)
+            finally:
+                lib.heif_image_handle_release(thumb)
+            if tw > 0 and th > 0 and (best is None or tw * th > best[1] * best[2]):
+                best = (int(ids[i]), int(tw), int(th))
+        return best
+
+    def _decode_thumbnail_fallback(self) -> Image.Image | None:
+        """ タイル経路を諦めて thmb へ倒す（上限超過時。サイズ判定で選ぶ経路とは別） """
+        thumb = self._best_thumbnail()
+        if thumb is None:
+            logger.warning('HEIC のタイルが大きすぎ、サムネイルも無いためスキップします')
+            return None
+        logger.info('HEIC のタイルが大きいため埋め込みサムネイルを使います')
+        return self._decode_thumbnail(thumb[0])
+
+    def _decode_thumbnail(self, thumb_id: int) -> Image.Image | None:
+        """ 埋め込みサムネイル（thmb）をデコードする。取得できなければ None """
+        lib = self._lib
         thumb = C.c_void_p()
-        err = lib.heif_image_handle_get_thumbnail(self._handle, ids[0], C.byref(thumb))
+        err = lib.heif_image_handle_get_thumbnail(self._handle, thumb_id, C.byref(thumb))
         if err.code != 0:
             logger.warning('HEIC のサムネイルを取得できません: %r', err.message)
             return None
         try:
-            logger.info('HEIC のタイルが大きいため埋め込みサムネイルを使います')
             # サムネイルは primary の変換（向き）を引き継ぐ。thmb 自体は変換を持たない
             return self._apply_transforms(self._decode_to_image(thumb, None))
         finally:
             lib.heif_image_handle_release(thumb)
+
+
+def _open_handle(lib: Any, source: 'bytes | Path | None', keep: Any) -> tuple[Any, Any]:
+    """
+    context を作って primary image の handle を取る。`(ctx, handle)` を返す。
+    失敗したら context を解放して OSError を送出する。`keep` は bytes 入力のバッファ
+    （`read_from_memory_without_copy` が参照し続けるので、呼び出し元が生存を保つこと）。
+    """
+    ctx = lib.heif_context_alloc()
+    if not ctx:
+        raise OSError('heif_context を確保できません')
+    handle = C.c_void_p()
+    try:
+        if isinstance(source, Path):
+            err = lib.heif_context_read_from_file(
+                ctx, str(source).encode('utf-8', 'surrogateescape'), None)
+        else:
+            err = lib.heif_context_read_from_memory_without_copy(ctx, keep, len(keep), None)
+        if err.code == 0:
+            err = lib.heif_context_get_primary_image_handle(ctx, C.byref(handle))
+        if err.code != 0:
+            raise OSError(f'HEIC を開けませんでした: {err.message!r}')
+    except BaseException:
+        lib.heif_context_free(ctx)
+        raise
+    return ctx, handle
 
 
 def open_heif(source: 'bytes | Path') -> HeifImage | None:
@@ -459,34 +608,21 @@ def open_heif(source: 'bytes | Path') -> HeifImage | None:
     lib = _load()
     if lib is None:
         return None
-    ctx = lib.heif_context_alloc()
-    if not ctx:
-        return None
-    handle = C.c_void_p()
-    keep = None
+    keep = None if isinstance(source, Path) else bytes(source)
     try:
-        if isinstance(source, Path):
-            err = lib.heif_context_read_from_file(ctx, str(source).encode('utf-8', 'surrogateescape'),
-                                                  None)
-        else:
-            keep = bytes(source)
-            err = lib.heif_context_read_from_memory_without_copy(ctx, keep, len(keep), None)
-        if err.code == 0:
-            err = lib.heif_context_get_primary_image_handle(ctx, C.byref(handle))
-        if err.code != 0:
-            logger.warning('HEIC を開けませんでした: %r', err.message)
-            lib.heif_context_free(ctx)
-            return None
-        try:
-            return HeifImage(lib, ctx, handle, keep)
-        except (OSError, ValueError) as e:
-            logger.warning('HEIC の情報を読めませんでした: %s', e)
-            lib.heif_image_handle_release(handle)
-            lib.heif_context_free(ctx)
-            return None
+        ctx, handle = _open_handle(lib, source, keep)
+    except OSError as e:
+        logger.warning('%s', e)
+        return None
+    try:
+        return HeifImage(lib, ctx, handle, keep, source if isinstance(source, Path) else keep)
+    except (OSError, ValueError) as e:
+        logger.warning('HEIC の情報を読めませんでした: %s', e)
+        lib.heif_image_handle_release(handle)
+        lib.heif_context_free(ctx)
+        return None
     except BaseException:
-        if handle:
-            lib.heif_image_handle_release(handle)
+        lib.heif_image_handle_release(handle)
         lib.heif_context_free(ctx)
         raise
 
