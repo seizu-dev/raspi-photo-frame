@@ -369,7 +369,15 @@ src/
     は維持する。並行化は「1枚の中のタイル」だけで、複数枚の同時デコードではない）。
     スレッドごとに context を開くのは同一 context の同時デコードの安全性を確認できて
     いないため（共有に戻さない）。`decode()` は毎回この定数を参照する（ベンチは
-    モンキーパッチで差し替える。環境変数の口は作らない）
+    モンキーパッチで差し替える。環境変数の口は作らない） ↔ **`DECODE_NICE`**（10。
+    デコードのワーカーだけの nice。**スレッド単位**で `os.setpriority(PRIO_PROCESS,
+    get_native_id())` を掛ける〈Linux〉。**非 root では戻せないため、掛けるのは decode() ごとに
+    作って捨てる専用ワーカー（`ThreadPoolExecutor` の initializer）だけ。呼び出し元スレッド
+    〈先読みワーカー等〉や使い回すスレッドには絶対に掛けない**（プールを使い回す形に
+    しないこと。nice が他の処理へ漏れる）。そのため `DECODE_THREADS` が 1 でも grid でなくても、
+    `DECODE_NICE > 0` ならワーカー1本に回す。0 なら setpriority を呼ばず従来どおり呼び出し元で
+    逐次。thmb 経路は小さいので呼び出し元のまま。失敗は警告1回で続行。**fps への効果は
+    rc.3 の実機で測るまで未測定**）
 -   `heif_decode.py` の `decode()` の thmb 採用条件（thmb の寸法が `min_scale` × 原寸を
     縦横とも満たす）↔ `photo_cache.py` の `_encode_heif()` が渡す `need` ↔ 表紙の
     `THUMBNAIL_MAX_SHORT_SIDE`（250px）。表紙（短辺 250px）は多くの HEIC で thmb

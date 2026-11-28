@@ -37,6 +37,7 @@ grid 画像（896x1024 などのタイルを並べたもの）なので、タイ
 import ctypes as C
 import logging
 import math
+import os
 import threading
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
@@ -62,13 +63,24 @@ MAX_CANVAS_PIXELS = 16_000_000
 # タイルの並行デコードのスレッド数。**実機（階層3、Zero 2 W 4コア、2026-11-24、rc.2）の
 # 実測で 3 に決めた。** 48MP の HEIC を 1024x600 contain で 1 スレッド 27〜28秒 → 2: 14〜16秒
 # → 3: 10〜11秒 → 4: 8〜9秒。4 より 1 つ少ない 3 にしたのは、1 コアを描画（メインループ）に
-# 残すため。**描画 fps への影響は未測定**（測定時は画面が消灯中だった）で、昼間に再測定する。
+# 残すため。描画 fps への影響は rc.2 の昼間の実測で約45 -> 約40（SPECIFICATION.md 9-12。混ざりものあり）。下の `DECODE_NICE` で緩和を試みる。
 # 1 ならスレッドを作らず従来の逐次経路と同じに動く。`decode()` は毎回この
 # モジュール定数を参照する（テスト・ベンチはモンキーパッチで差し替える）。
 # libheif への ctypes 呼び出し（`C.CDLL`）は呼び出し中 GIL を解放するので、Python スレッドでも
 # 複数コアを使える。一方でスレッドを増やすと CPU を使い切って描画 fps を落としうる
 # （`.claude/architecture.md` 参照）。
 DECODE_THREADS = 3
+
+# デコード用ワーカースレッドの nice 値。描画（メインループ）に CPU を優先させるため上げる。
+# rc.2 実機（階層3、画面点灯中）で DECODE_THREADS=3 のデコード中に運用中アプリの平均 fps が
+# 約45 -> 約40（5秒窓で 9.8〜49.6）に落ちたことへの対策。**効果は実機で fps を測って確かめる
+# こと（rc.3 で測る。未測定）。** Linux の nice はスレッド単位なので、ワーカーだけに掛ければ
+# 呼び出し元（先読みワーカー・メイン）は影響を受けない。**nice は非 root では戻せない**ため、
+# 掛けるのは「decode() ごとに作って捨てる専用ワーカー」だけで、呼び出し元スレッドや
+# 使い回すスレッドには絶対に掛けない。0 なら setpriority を呼ばない
+# （`decode()` は毎回この定数を参照する。ベンチはモンキーパッチで差し替える）。
+DECODE_NICE = 10
+_nice_warned = False
 
 # HEVC 系の brand（ftyp の major / compatible のどれかにあれば HEIC とみなす）。
 # AVIF（brand が avif / avis）は AV1 デコーダ（dav1d プラグイン）を入れないので対象外。
@@ -438,12 +450,17 @@ class HeifImage:
             canvas = Image.new('RGB', (cw, ch))
             cols, rows = self._tiling.num_columns, self._tiling.num_rows
             coords = [(tx, ty) for ty in range(rows) for tx in range(cols)]
-            threads = min(int(DECODE_THREADS), len(coords))
-            if threads <= 1 or not self.is_tiled:
+            threads = max(1, min(int(DECODE_THREADS), len(coords)))
+            if not self.is_tiled:
+                threads = 1
+            if DECODE_NICE > 0 or (threads > 1 and self.is_tiled):
+                # nice を掛けられるのは専用ワーカーだけ（呼び出し元には戻せないので掛けない）。
+                # そのため 1 スレッド・非タイルでもワーカー1本に回す（handle を開き直す分の
+                # コストは小さい）。
+                self._decode_tiles_parallel(canvas, coords, n, threads)
+            else:
                 for tx, ty in coords:
                     self._paste(canvas, self._decode_tile(self._handle, tx, ty, n))
-            else:
-                self._decode_tiles_parallel(canvas, coords, n, threads)
             return self._apply_transforms(canvas)
         except (OSError, MemoryError, ValueError) as e:
             logger.warning('HEIC をデコードできませんでした: %s', e)
@@ -507,7 +524,11 @@ class HeifImage:
         def job(tx: int, ty: int) -> tuple[int, int, Image.Image] | None:
             return self._decode_tile(thread_handle(), tx, ty, n)
 
-        pool = ThreadPoolExecutor(max_workers=threads, thread_name_prefix='heif-tile')
+        # **ワーカーは decode() ごとに作って shutdown で捨てる。** nice は戻せないので、
+        # プールを使い回すとデコード以外の処理へ漏れる。initializer は各ワーカーの開始時に
+        # 1回、最初のタイルより前に走る（そのスレッドだけに nice を掛ける）。
+        pool = ThreadPoolExecutor(max_workers=threads, thread_name_prefix='heif-tile',
+                                  initializer=_lower_thread_priority)
         pending: set[Future] = set()
         try:
             for tx, ty in coords:
@@ -574,6 +595,24 @@ class HeifImage:
             return self._apply_transforms(self._decode_to_image(thumb, None))
         finally:
             lib.heif_image_handle_release(thumb)
+
+
+def _lower_thread_priority() -> None:
+    """
+    呼び出したスレッド自身の nice を `DECODE_NICE` へ上げる（ワーカーの initializer 専用）。
+    Linux では `setpriority(PRIO_PROCESS, tid)` がスレッド単位で効く。失敗しても
+    デコードは続ける（警告は1回だけ。例外を投げるとプールが壊れるため握る）。
+    """
+    global _nice_warned
+    nice = int(DECODE_NICE)
+    if nice <= 0:
+        return
+    try:
+        os.setpriority(os.PRIO_PROCESS, threading.get_native_id(), nice)
+    except (OSError, AttributeError) as e:
+        if not _nice_warned:
+            _nice_warned = True
+            logger.warning('デコードスレッドの優先度を下げられませんでした（続行します）: %s', e)
 
 
 def _open_handle(lib: Any, source: 'bytes | Path | None', keep: Any) -> tuple[Any, Any]:
