@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 
+from src import heif_decode
 from src.provider_util import ISO_DATE_FORMAT, parse_exif_date
 
 if TYPE_CHECKING:
@@ -76,9 +77,11 @@ THUMBNAIL_MAX_SHORT_SIDE = 250
 # 縮小デコード）が効いてピークが画素数に比例しないが、PNG / WebP には縮小デコードが
 # 無く、全画素をデコードするため上限を厳しくする（階層1の実測: 30MP の PNG で
 # +129MB、WebP で +463MB）。
-# HEIC の原本を無条件にデコードすると 48MP で maxrss 約602MB（PoC 実測）になり、
-# RAM 416MB の実機では成り立たない。超過分はデコードせずスキップする
-# （`.claude/architecture.md`「画素上限なしで原本をデコードしない」）。
+# HEIC の原本は Pillow ではなく `heif_decode`（libheif のタイル単位デコード）で
+# 扱う。無条件に全体デコードすると 48MP で maxrss 約412〜602MB になり実機では成り立たない
+# ため、ここの画素上限（JPEG/PNG/WebP 用）とは別に `heif_decode` が自分の上限を持つ。
+# 超過分はデコードせずスキップする（`.claude/architecture.md`「画素上限なしで原本を
+# デコードしない」）。
 #
 # PNG / WebP の値は実機（arm64、v1.3.0）の実測に基づく。通常の経路（Pillow の
 # Image.load）のピークは WebP 8MP で +121MB、4MP で +65MB、PNG 12MP で +61MB、
@@ -180,7 +183,7 @@ def _decode_webp_direct(raw: 'bytes | Path') -> 'tuple[str, Image.Image | None]'
 
 
 # プロセス全体で1本のデコードロック。原本を扱う取得元（Google Drive 等。PR2 で追加）は
-# HEIC 等のデコード前サイズが大きい画像をそのまま開くことがあり、先読みスレッドと
+# 大きな画像（HEIC のタイルデコード含む）をそのまま開くことがあり、先読みスレッドと
 # アルバムサムネイル取得スレッドが同時にデコードするとピークメモリが跳ね上がる
 # （RAM 512MB が最大の制約のため、デコード〜エンコードの区間はプロセス全体で
 # 直列化してピークを抑える。Immich の preview/thumbnail はそこまで大きくないが、
@@ -766,6 +769,66 @@ class PhotoCache:
             img = img.transpose(method)
         return img
 
+    def _to_jpeg_bytes(self, img: Image.Image, max_size: tuple[int, int] | None) -> bytes:
+        """
+        縮小・補正済みの画像を JPEG バイト列へ保存する（`_encode_jpeg` と `_encode_heif` が共有）。
+        設定は元の `_encode_jpeg` の末尾と同一（Immich 側の出力はバイト単位で不変）。
+        """
+        # RGBA / P モードのままでは JPEG で保存できない
+        rgb = img if img.mode == 'RGB' else img.convert('RGB')
+        buf = BytesIO()
+        try:
+            # 原本モードの写真本体（max_size 指定あり）だけ品質設定を上げる。
+            # 表紙（max_size=None）は原本モードでも現行の設定のまま
+            # （Immich 側の出力はここでバイト単位を変えない）。
+            if self.originals and max_size:
+                rgb.save(buf, format='JPEG', quality=ORIGINALS_JPEG_QUALITY,
+                          subsampling=ORIGINALS_JPEG_SUBSAMPLING)
+            else:
+                rgb.save(buf, format='JPEG', quality=JPEG_QUALITY)
+        finally:
+            if rgb is not img:
+                rgb.close()
+        return buf.getvalue()
+
+    def _encode_heif(self, raw: bytes | Path, max_size: tuple[int, int] | None, fit: str,
+                     meta: dict[str, str] | None) -> bytes | None:
+        """
+        HEIC/HEIF（原本モードのみ）を JPEG バイト列へ変換する。呼び出し元（`_encode_jpeg`）が
+        `_DECODE_LOCK` を保持している。
+
+        タイル単位デコード（`heif_decode`）で「必要寸法の1〜2倍」のキャンバスまで縮めてから、
+        最終の縮小・fit は他形式と同じ `_shrink()` に任せる（実行時リサイズを増やさず、
+        contain / cover / smart の挙動と表紙の短辺 250px の契約を共有するため）。
+        向きは `heif_decode` が補正済み（HEIF では `irot` / `imir` が正で、EXIF の
+        Orientation は見ない）。サイズ・画素上限は `heif_decode` が自分で判定する。
+        """
+        heif = heif_decode.open_heif(raw)
+        if heif is None:
+            return None
+        with heif:
+            if meta is not None and max_size:
+                exif_raw = heif.exif()
+                if exif_raw:
+                    try:
+                        meta['date'] = parse_exif_date(exif_raw)
+                    except Exception as e:  # noqa: BLE001 - 日付の失敗で写真を落とさない
+                        logger.debug('撮影日を読めませんでした: %s', type(e).__name__)
+            vis_w, vis_h = heif.size
+            if max_size:
+                # fit は見た目の寸法で解決する（キャンバスは丸めで寸法が1画素ずれうるので、
+                # 正方形に近い写真で smart の判定が変わらないよう、ここで確定させて渡す）
+                fit = resolve_fit(fit, heif.size, max_size)
+                ratios = (max_size[0] / vis_w, max_size[1] / vis_h)
+                need = max(ratios) if fit == FIT_COVER else min(ratios)
+            else:
+                need = THUMBNAIL_MAX_SHORT_SIDE / max(1, min(vis_w, vis_h))
+            decoded = heif.decode(need)
+        if decoded is None:
+            return None
+        img = self._shrink(decoded, max_size, fit)
+        return self._to_jpeg_bytes(img, max_size)
+
     def _encode_jpeg(self, raw: bytes | Path, max_size: tuple[int, int] | None,
                      fit: str = FIT_CONTAIN,
                      meta: dict[str, str] | None = None) -> bytes | None:
@@ -796,6 +859,11 @@ class PhotoCache:
         source = raw if isinstance(raw, Path) else BytesIO(raw)
         try:
             with _DECODE_LOCK, ExitStack() as stack:
+                if self.originals and heif_decode.sniff(raw):
+                    # HEIC/HEIF は Pillow で開かない（pillow-heif は入れていない。全体
+                    # デコードは 48MP で実機の RAM を超える）。brand で判定するので拡張子には
+                    # 依存しない。Immich（originals=False）はここへ来ない（出力不変）。
+                    return self._encode_heif(raw, max_size, fit, meta)
                 # 元画像は ExitStack に載せる。WebP の直接デコードでは、形式・上限・
                 # Orientation を確定させたあとに元画像を閉じてから（stack.close()）
                 # デコードする（WebPAnimDecoder がファイル全体を常駐させるため）。
@@ -908,22 +976,7 @@ class PhotoCache:
                 if direct_img is None:
                     img = self._shrink(img, max_size, fit)
 
-                # RGBA / P モードのままでは JPEG で保存できない
-                rgb = img if img.mode == 'RGB' else img.convert('RGB')
-                buf = BytesIO()
-                try:
-                    # 原本モードの写真本体（max_size 指定あり）だけ品質設定を上げる。
-                    # 表紙（max_size=None）は原本モードでも現行の設定のまま
-                    # （Immich 側の出力はここでバイト単位を変えない）。
-                    if self.originals and max_size:
-                        rgb.save(buf, format='JPEG', quality=ORIGINALS_JPEG_QUALITY,
-                                  subsampling=ORIGINALS_JPEG_SUBSAMPLING)
-                    else:
-                        rgb.save(buf, format='JPEG', quality=JPEG_QUALITY)
-                finally:
-                    if rgb is not img:
-                        rgb.close()
-                return buf.getvalue()
+                return self._to_jpeg_bytes(img, max_size)
         except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as e:
             # 壊れたデータ・未対応形式・巨大画像（画素上限超過）は握ってスキップする
             # （1枚のために停止させない。DecompressionBombError は Exception 直系で

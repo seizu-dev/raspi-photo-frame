@@ -95,15 +95,19 @@ Docker 基盤 約75MB と他コンテナを引いた残りがアプリの取り�
 -   **画像キャッシュを永続ボリュームに置かずコンテナ内に置かない。** 再作成のたびに
     再ダウンロードすると 2.4GHz Wi-Fi の帯域を浪費する。
 -   **秘匿情報（`config.py` / `settings.json`）をイメージに焼き込まない。** ボリュームで渡す。
--   **Google Drive の HEIC/HEIF の原本をデコードしない。** サーバー側の縮小
-    （`thumbnailLink`）が使えない場合はスキップし、JPEG/PNG/WebP に限って
-    原本へフォールバックする。
+-   **HEIC/HEIF の原本を Pillow・libheif の全体デコードで開かない。** ローカル / S3 取得元
+    に限り、`heif_decode.py` の**タイル単位デコード**（grid の各タイルをデコード→即縮小→
+    キャンバスへ貼る。階層1の実測で 48MP が maxrss 約49MB）だけを許可する。
+    **Google Drive は従来どおり**サーバー側の縮小（`thumbnailLink`）が使えない場合は
+    スキップし、JPEG/PNG/WebP に限って原本へフォールバックする（Drive の原本 HEIC は
+    デコードしない）。**Immich 経路（`originals=False`）には掛けない。**
 -   **画素上限なしで原本をデコードしない。** `PhotoCache`（`originals=True`）は
     **形式別の上限 `original_pixel_limit()`**（JPEG 40MP = `MAX_ORIGINAL_PIXELS`、
     PNG・その他 12MP、WebP は直接デコード経路の静止画のみ 8MP。アニメーション WebP と
     `WebPDecode` が使えない場合は通常経路なので 4MP = `MAX_ORIGINAL_PIXELS_WEBP_FALLBACK`）
     を超える画像をデコード前にスキップする。
     JPEG は `draft()` の縮小デコードが効くが PNG/WebP には無いため厳しくしてある。
+    **HEIC/HEIF はこの表の対象外で `heif_decode.py` が別の上限（タイル1枚 / 全体 / キャンバス）を持つ。**
     **PNG/WebP の値は実機（階層3、v1.3.0）の実測に基づく**（SPECIFICATION.md 9-11）。
     WebP の直接デコード経路（8MP）の実機値（v1.3.1、階層3）は静止 RGB +64MB、
     RGBA+回転 +90MB、lossless +102MB（旧経路は 8MP で +125MB）。
@@ -129,13 +133,17 @@ src/
                             PhotoProvider 実装（新規。PR2）。サーバー側の縮小
                             （thumbnailLink）を優先し、原本は例外経路として扱う
   local_api.py              ローカルフォルダを写真取得元にする PhotoProvider 実装
-                            （新規。サブフォルダ＝アルバム。原本モード。HEIC は扱わない）
+                            （新規。サブフォルダ＝アルバム。原本モード。HEIC は libheif が
+                            使えるときだけ一覧に載せる）
   s3_api.py                 S3 互換ストレージ（GCS の XML API 等）を写真取得元にする
                             PhotoProvider 実装（新規。path-style・GET のみ。SigV4 署名は
                             hmac/hashlib で自前。local と同じ ID 形式・原本モード）
   provider_util.py          local_api / s3_api / photo_cache が共用する部品（ID の
                             base64・ハッシュ、EXIF の撮影日の解析。他の自作モジュールを
                             import しない）
+  heif_decode.py            HEIC/HEIF のタイル単位デコード（新規。libheif.so.1 を ctypes で
+                            遅延ロードして使う。ローカル / S3 の原本モード専用。photo_cache の
+                            _encode_heif() だけが呼ぶ。pillow-heif は使わない）
   photo_cache.py            表示解像度確定済み画像のディスクキャッシュ（再設計。
                             取得元ごとに namespace でサブディレクトリを分ける）
   photo_source.py           provider とキャッシュを繋ぐ層（新規。フォールバックと表示順。
@@ -351,6 +359,33 @@ src/
     `photo_source.load_list()` から呼ぶ）もこの組に含まれる。** キーの作り方を
     変えると掃除の接頭辞（`daily_pickup_`）が合わなくなって空振りし、
     JSON が日付ごとに溜まり続ける
+-   `heif_decode.py` の `DECODE_THREADS`（タイルの並行デコード。**実機の実測で 3 に決定**。
+    48MP・1024x600 contain が 1→27〜28秒、2→14〜16秒、3→10〜11秒、4→8〜9秒。4 でなく 3 なのは
+    1 コアを描画に残すため。**描画 fps は実機（階層3、画面点灯中）で nice なしだと平均約35.5〈最小 10 台〉、`DECODE_NICE` = 10 で約40.5〈最小 30.2〉**。SPECIFICATION.md 9-12）↔ **メモリのピーク**（スレッドごとに libheif の context と
+    デコーダの作業領域を持つため、増分は「タイル1枚×スレッド数」より大きい。階層1で
+    1 → 4 スレッドが 41 → 65MB、縮小率 1/4 で 53 → 98MB）↔ **描画 fps**（デコードで
+    CPU を使い切ると描画が落ちうる。`PRESENT_YIELD_SEC` の項と同じ GIL・CPU の取り合い。
+    実機で fps を測ること）↔ `photo_cache.py` の `_DECODE_LOCK`（プロセス全体で1枚ずつ
+    は維持する。並行化は「1枚の中のタイル」だけで、複数枚の同時デコードではない）。
+    スレッドごとに context を開くのは同一 context の同時デコードの安全性を確認できて
+    いないため（共有に戻さない）。`decode()` は毎回この定数を参照する（ベンチは
+    モンキーパッチで差し替える。環境変数の口は作らない） ↔ **`DECODE_NICE`**（10。
+    デコードのワーカーだけの nice。**スレッド単位**で `os.setpriority(PRIO_PROCESS,
+    get_native_id())` を掛ける〈Linux〉。**非 root では戻せないため、掛けるのは decode() ごとに
+    作って捨てる専用ワーカー（`ThreadPoolExecutor` の initializer）だけ。呼び出し元スレッド
+    〈先読みワーカー等〉や使い回すスレッドには絶対に掛けない**（プールを使い回す形に
+    しないこと。nice が他の処理へ漏れる）。そのため `DECODE_THREADS` が 1 でも grid でなくても、
+    `DECODE_NICE > 0` ならワーカー1本に回す。0 なら setpriority を呼ばず従来どおり呼び出し元で
+    逐次。thmb 経路は小さいので呼び出し元のまま。失敗は警告1回で続行。**fps への効果は
+    rc.3 の実機（階層3）で実測済み: 平均 35.5 -> 40.5、大きな落ち込みが消え、デコード時間は変わらない。10 で確定**）
+-   `heif_decode.py` の `decode()` の thmb 採用条件（thmb の寸法が `min_scale` × 原寸を
+    縦横とも満たす）↔ `photo_cache.py` の `_encode_heif()` が渡す `need` ↔ 表紙の
+    `THUMBNAIL_MAX_SHORT_SIDE`（250px）。表紙（短辺 250px）は多くの HEIC で thmb
+    （iPhone で 432x576）で足り、タイルをデコードしない（約 2.8秒 → 0.1秒。階層1）。
+    **表紙専用の分岐ではなく写真本体にも同じ判定が掛かる**（1024x600 contain は
+    thmb の高さが足りずタイル経路）。`THUMBNAIL_MAX_SHORT_SIDE` を上げると thmb で
+    足りなくなり表紙が再びタイル経路（実機 26秒）になる。上限超過時に thmb へ倒す
+    経路（`_decode_thumbnail_fallback`）とはログで区別する
 -   `photo_cache.py` の `display_size` ↔ 実機の表示解像度 1024x600
     （解像度を変えたらキャッシュ済みの画像はすべて作り直しになる）
 -   `settings.json` の `photo_fit` ↔ `config_manager.py` の既定値 ↔
@@ -386,6 +421,9 @@ src/
     （`ghcr.io/seizu-dev/raspi-photo-frame`）。イメージ名やステージ名を変えると、
     ワークフロー・`docker-compose.yml`・`tools/verification/album_bench_runner.sh`
     の3か所がずれる（後者は `IMAGE` 環境変数で上書きできるが既定値は揃えてある）。
+    **ハイフンを含むタグ（`v1.7.0-rc.1` 等）は pre-release 扱い**で、`latest` を更新せず
+    GitHub Release も `--prerelease` で作る（実機の compose が `${PF_IMAGE_TAG:-latest}` を
+    参照するため、rc が latest を上書きすると未検証イメージが実機に入る）。
 -   `dev` ステージの `SDL_RENDER_DRIVER=opengl`（x86 / llvmpipe 用）↔ `runtime` ステージ /
     `docker-compose.yml` の `SDL_RENDER_DRIVER=opengles2`（VideoCore IV 用）。
     階層1と階層3で値が異なるのが正しい。デバッグ中に一方の値をもう一方へ揃えないこと。
@@ -505,9 +543,36 @@ src/
         Immich / Drive は `rescan_on_load = False`（通信が高価なため）
     -   i18n の `album.local_root` も `name_key` 契約に乗る（`album.gdrive_root` と同じ。
         `local_api.py` の「未分類」は `albumName=''` + `name_key`、`is_virtual` は付けない）
-    -   **ローカルも HEIC/HEIF を扱わない。** `local_api.py` の `IMAGE_EXTENSIONS`
-        （JPEG/PNG/WebP）と `SKIPPED_EXTENSIONS`。Drive のような縮小済みの手段が無く、
-        原本デコードのピークが実機 RAM で成り立たないため
+    -   **HEIC/HEIF のタイル単位デコード**（ローカル / S3 のみ。2026-11-23 に導入）:
+        `heif_decode.py`（`sniff()` / `open_heif()` / `HeifImage.decode()` / `exif()` /
+        `available()`）↔ `photo_cache.py` の `_encode_jpeg()` 冒頭の
+        `self.originals and heif_decode.sniff(raw)` 分岐と `_encode_heif()`（`_DECODE_LOCK`
+        の内側。縮小は他形式と同じ `_shrink()` を共有し、JPEG 保存は
+        `_to_jpeg_bytes()` を `_encode_jpeg()` と共有する）↔ `local_api.py` /
+        `s3_api.py` の `HEIF_EXTENSIONS`（`IMAGE_EXTENSIONS` に含め、**`heif_decode.available()`
+        が False のときだけスキップ**へ戻す）↔ `local_api.py` の `_read_date()`
+        （`heif_decode.read_exif()`。Pillow は HEIC を開けない）↔ **`Dockerfile` base の
+        apt の `libheif1` / `libheif-plugin-libde265`**（`--no-install-recommends` ではプラグインが
+        入らず、無いと開けてもデコードで失敗する）。片方だけ変えると、一覧に載るのに
+        デコードできない・apt を消してもコードが libheif 前提のまま、になる。
+        -   **向きは `heif_decode` が `irot` / `imir` を自前で補正する。** libheif の
+            `process_image_transformations=1` のタイル座標は iPhone のサンプルで実際の位置と
+            一致しなかったため、変換なしの座標＋`ignore_transformations=1` でデコードし、
+            縮小後のキャンバスへ Pillow の transpose を掛ける。EXIF の Orientation は
+            見ない（HEIF では `irot` / `imir` が正）。`clap` は適用しない
+        -   **縮小は整数分の1（`Image.reduce`）で、N はタイルの縦横の最大公約数の約数。**
+            任意倍率でタイルごとに縮めるとタイル境界の位相がずれて全体縮小と食い違う
+            （階層1の実測、平均 2.3/255）。整数倍なら全体を一括で縮めた結果と画素単位で一致する
+        -   **`heif_decoding_options` は必ず `heif_decoding_options_alloc()` で確保し、先頭2バイト
+            （`version` / `ignore_transformations`）だけ書き換える。** 構造体は版ごとに成長する。
+            ヘッダの根拠は libheif v1.23.6。**`plane_readonly2` 等 1.23 の API を前提**とするため、
+            apt の libheif を下げる／ベースイメージ（Debian trixie）を変えるときは
+            `heif_decode._SIGNATURES` の関数がすべて存在するか確認する
+        -   **上限 `MAX_TILE_PIXELS`（12MP）/ `MAX_TOTAL_PIXELS`（100MP）/ `MAX_CANVAS_PIXELS`
+            （16MP）は階層1での仮置き。実機（階層3）で測って決める。** タイル1枚が大きい画像は
+            埋め込みサムネイル（thmb）へ倒し、無ければスキップ
+        -   **Drive は変更なし**（`thumbnailLink` 経路。原本 HEIC はスキップのまま）。AVIF も
+            対象外（dav1d プラグインを入れない。brand が avif / avis なら `sniff()` が False）
     -   `PhotoProvider.cache_namespace` ↔ `PhotoCache.__init__` の `namespace` 引数
         （`photos/<ns>/` 等へのサブディレクトリ分け）↔ `enforce_limit()` /
         `get_total_size()` が見るルート（`self._photos_root` = 常に
@@ -592,11 +657,13 @@ src/
         （JXL 原本は同一）・取得失敗・EXIF Orientation が 1 と未設定以外（fullsize は原本で未補正）・
         向き（横/縦/正方形）が preview と不一致・`original_pixel_limit()` 超過
         （式は再利用し複製しない）
-    -   **HEIC/HEIF の原本はデコードしない。** `gdrive_api.py` の
+    -   **Drive は HEIC/HEIF の原本をデコードしない。** `gdrive_api.py` の
         `ORIGINAL_MIME_ALLOWED`（JPEG/PNG/WebP のみ）↔ `_skipped_originals`
         （一度スキップしたら `files.get` すら呼ばず即座に諦める）。
-        48MP の HEIC を原本からデコードするとピーク約602MB（PoC 実測）になり、
-        実機の RAM 416MB では成り立たないため
+        48MP の HEIC を Pillow で全体デコードするとピーク約602MB（PoC 実測）になり、
+        実機の RAM 416MB では成り立たないため。ローカル / S3 はタイル単位デコード
+        （上の `heif_decode` の項）で対応したが、Drive は縮小済みの `thumbnailLink` が
+        使えるので従来どおり変えていない
     -   **署名付き URL（thumbnailLink・原本のダウンロード URL）とアクセストークンを
         ログに出さない。** `gdrive_api.py` の `_redact()`（ホスト名だけを残す）を
         必ず経由する
